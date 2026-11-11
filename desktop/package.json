@@ -1,0 +1,9 @@
+{
+  "name": "echo-desktop",
+  "productName": "Echo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Echo: conversa em tempo real, em rodas e canais.",
+  "author": "Echo",
+  "main": "src/main/index.js"
+}

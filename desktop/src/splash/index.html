@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'">
+  <meta name="color-scheme" content="light dark">
+  <title>Echo</title>
+  <link rel="stylesheet" href="splash.css">
+  <script src="splash.js" defer></script>
+</head>
+<body>
+  <button id="quit" class="quit" type="button" aria-label="Fechar o Echo">&times;</button>
+  <main>
+    <img class="mark" src="../../assets/icon.png" width="64" height="64" alt="">
+    <h1 class="wordmark">Echo<em>.</em></h1>
+
+    <section id="progress">
+      <p id="status" class="status" role="status">Abrindo…</p>
+      <p id="detail" class="detail"></p>
+      <div id="actions" class="actions" hidden>
+        <button id="retry" class="button" type="button">Tentar de novo</button>
+        <button id="change" class="link" type="button">Usar outro servidor</button>
+      </div>
+    </section>
+
+    <form id="server-form" class="server-form" hidden>
+      <label for="server-url">Endereço do servidor</label>
+      <input id="server-url" type="url" required spellcheck="false" placeholder="http://127.0.0.1:3210">
+      <p id="server-error" class="error" role="alert" hidden></p>
+      <p class="hint">Use https:// para servidores fora desta máquina: em http:// a conversa trafega sem proteção.</p>
+      <div class="row">
+        <button id="cancel" class="link" type="button">Cancelar</button>
+        <button class="button" type="submit">Conectar</button>
+      </div>
+    </form>
+  </main>
+</body>
+</html>

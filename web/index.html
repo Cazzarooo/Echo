@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Echo</title>
+  <link rel="icon" href="/app/assets/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/app/assets/styles.css">
+  <script type="module" src="/app/assets/js/main.js"></script>
+</head>
+<body>
+  <header id="titlebar" class="titlebar" hidden>
+    <img class="titlebar__mark" src="/app/assets/icon.svg" alt="" width="18" height="18">
+    <span class="titlebar__name">Echo</span>
+  </header>
+  <div id="root" class="root">
+    <p class="boot">Abrindo o Echo…</p>
+  </div>
+  <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+  <noscript><p class="boot">O Echo precisa de JavaScript para funcionar.</p></noscript>
+</body>
+</html>

@@ -1,0 +1,49 @@
+# Empacotamento do aplicativo desktop (`npm run dist`).
+# O instalador leva a casca (desktop/) e, ao lado dela, o servidor e a interface,
+# para o Echo instalado funcionar sozinho com o servidor embutido.
+
+appId: app.echo.desktop # o mesmo identificador que a casca usa para os avisos do Windows
+productName: Echo
+
+directories:
+  app: desktop
+  output: dist
+  buildResources: desktop/assets
+
+files:
+  - src/**
+  - assets/**
+  - package.json
+
+# Ficam em resources/, fora do pacote do aplicativo: é de lá que o servidor embutido roda.
+extraResources:
+  - from: server
+    to: server
+    filter:
+      - src/**
+      - package.json
+  - from: web
+    to: web
+  - from: node_modules/ws
+    to: server/node_modules/ws
+
+npmRebuild: false
+publish: null
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: desktop/assets/icon.png
+
+nsis:
+  oneClick: true # instala direto na conta do usuário, sem pedir administrador
+  perMachine: false
+  artifactName: Echo-Instalador-${version}.${ext}
+  shortcutName: Echo
+  createDesktopShortcut: true
+  uninstallDisplayName: Echo
+  installerLanguages:
+    - pt_BR
+  language: "1046"

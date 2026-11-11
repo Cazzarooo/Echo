@@ -1,0 +1,27 @@
+{
+  "name": "echo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Echo: chat em tempo real com rodas e canais. Servidor, interface web e casca desktop.",
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "node scripts/dev.mjs",
+    "server": "node server/src/index.js",
+    "desktop": "electron desktop",
+    "seed": "node scripts/seed.mjs",
+    "icons": "node scripts/make-icons.mjs",
+    "test": "node --test \"server/test/*.test.mjs\" \"desktop/test/*.test.mjs\"",
+    "smoke": "node scripts/smoke.mjs",
+    "dist": "electron-builder --win --config electron-builder.yml"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "ws": "^8.22.2"
+  },
+  "devDependencies": {
+    "electron": "^45.3.0",
+    "electron-builder": "^26.18.0"
+  }
+}
