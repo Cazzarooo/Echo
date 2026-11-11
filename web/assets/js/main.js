@@ -117,6 +117,7 @@ function notifyIfAway({ message, live }) {
 subscribe((topic, detail) => {
   if (topic === 'unread' || topic === 'spaces') updateUnreadSignals();
   if (topic === 'message') notifyIfAway(detail);
+  if (topic === 'resync') resync();
 });
 
 desktop.onNotificationClick((tag) => selectChannel(Number(tag)));

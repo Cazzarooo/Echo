@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/server.mjs": {
+      "includeFiles": "web/**",
+      "maxDuration": 300
+    }
+  },
+  "rewrites": [{ "source": "/(.*)", "destination": "/api/server" }]
+}

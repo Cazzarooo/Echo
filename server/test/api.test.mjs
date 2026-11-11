@@ -21,8 +21,13 @@ before(async () => {
   const config = loadConfig({});
   config.port = 0;
   config.dbFile = path.join(dataDir, 'echo.sqlite');
+  // ECHO_TEST_POSTGRES=1 (ver postgres.test.mjs) roda esta mesma bateria no banco do servidor hospedado.
+  if (process.env.ECHO_TEST_POSTGRES === '1') {
+    const { createPgliteDriver } = await import('./pglite-driver.mjs');
+    config.postgres = { driver: await createPgliteDriver() };
+  }
   config.rateLimits.auth.limit = 1000; // todos os testes saem do mesmo IP
-  app = createApp(config);
+  app = await createApp(config);
   const { port } = await app.listen();
   base = `http://127.0.0.1:${port}`;
 });

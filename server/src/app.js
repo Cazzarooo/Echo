@@ -1,7 +1,6 @@
-import fs from 'node:fs';
 import http from 'node:http';
-import path from 'node:path';
-import { openDatabase } from './db.js';
+import { createLocalBus, createPostgresBus } from './bus.js';
+import { openDatabase } from './db/index.js';
 import { createHub } from './hub.js';
 import { HttpError, sendJson } from './http-util.js';
 import { buildApi } from './routes.js';
@@ -19,12 +18,13 @@ function applySecurityHeaders(res) {
 
 /**
  * Monta o servidor inteiro: banco, API em /api, gateway em /gateway e a
- * interface web em /app. Nada escuta a rede até chamar listen().
+ * interface web em /app. Nada escuta a rede até chamar listen(); numa
+ * hospedagem serverless, quem atende é o `server` devolvido aqui.
  */
-export function createApp(config) {
-  fs.mkdirSync(path.dirname(config.dbFile), { recursive: true });
-  const db = openDatabase(config.dbFile);
-  const hub = createHub({ db });
+export async function createApp(config) {
+  const { db, driver } = await openDatabase(config);
+  const hub = createHub({ db, bus: driver ? createPostgresBus(driver) : createLocalBus() });
+  await hub.start();
   const api = buildApi({ db, hub, config });
 
   async function handle(req, res) {
@@ -69,7 +69,9 @@ export function createApp(config) {
   });
   server.on('upgrade', (req, socket, head) => hub.handleUpgrade(req, socket, head));
 
-  const sessionSweep = setInterval(() => db.deleteExpiredSessions(), SESSION_SWEEP_MS);
+  const sessionSweep = setInterval(() => {
+    db.deleteExpiredSessions().catch((error) => console.error('[echo] limpeza de sessões falhou:', error.message));
+  }, SESSION_SWEEP_MS);
   sessionSweep.unref();
 
   return {
@@ -88,12 +90,14 @@ export function createApp(config) {
     async close() {
       clearInterval(sessionSweep);
       api.stop();
-      hub.close();
-      await new Promise((resolve) => {
-        server.close(() => resolve());
-        server.closeAllConnections();
-      });
-      db.close();
+      await hub.close();
+      if (server.listening) {
+        await new Promise((resolve) => {
+          server.close(() => resolve());
+          server.closeAllConnections();
+        });
+      }
+      await db.close();
     },
   };
 }

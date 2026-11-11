@@ -45,7 +45,21 @@ Sai em `dist/Echo-Instalador-<versão>.exe`. Ele instala na conta do usuário (s
 
 ## Hospedar para outras pessoas
 
-Para gente em computadores diferentes conversar, todos precisam falar com o mesmo servidor, na internet e com HTTPS. O `Dockerfile` na raiz monta esse servidor (API, gateway e a interface web):
+Para gente em computadores diferentes conversar, todos precisam falar com o mesmo servidor, na internet e com HTTPS. Há dois caminhos.
+
+### Vercel
+
+O repositório já vem pronto para a Vercel (`vercel.json` e `api/server.mjs`):
+
+1. Na Vercel, importe o repositório como projeto.
+2. Em **Storage**, adicione um banco **Postgres** (por exemplo o Neon, no Marketplace) e conecte-o ao projeto. Isso define `DATABASE_URL` sozinho.
+3. Publique de novo (**Redeploy**) para o servidor enxergar o banco.
+
+Na Vercel não há disco permanente e podem existir várias instâncias do servidor ao mesmo tempo, então o Echo usa o Postgres no lugar do SQLite e faz as instâncias trocarem os avisos em tempo real pelo próprio banco (`LISTEN`/`NOTIFY`). O WebSocket da Vercel está em beta, e no plano gratuito cada conexão dura até 5 minutos; a interface reconecta sozinha.
+
+### Servidor próprio ou contêiner
+
+O `Dockerfile` na raiz monta o servidor (API, gateway e a interface web) com o banco SQLite em arquivo:
 
 - Ele escuta na porta `8080` e guarda o banco em `/data`. **Monte um volume persistente em `/data`**, senão as contas e as conversas somem a cada reinício.
 - A hospedagem precisa aceitar WebSocket e entregar HTTPS na frente do contêiner.
@@ -61,7 +75,7 @@ npm test
 npm run smoke
 ```
 
-- `npm test` sobe o servidor numa porta livre com um banco temporário e o exercita por HTTP e WebSocket; também confere os canais de IPC da casca.
+- `npm test` sobe o servidor numa porta livre e o exercita por HTTP e WebSocket, uma vez com SQLite e outra com Postgres (um Postgres embutido, o PGlite); também confere os canais de IPC da casca.
 - `npm run smoke` abre o Electron de verdade (as janelas aparecem por alguns segundos), confere a ponte e o servidor embutido e deixa capturas em `.smoke/`. Com `ECHO_SMOKE_EXE=dist/win-unpacked/Echo.exe` ele verifica o aplicativo já empacotado.
 
 ## Configuração
@@ -72,6 +86,7 @@ npm run smoke
 | `ECHO_PORT` | `3210` | Porta do servidor. |
 | `ECHO_DATA_DIR` | `server/data` | Pasta do banco de dados. |
 | `ECHO_SECURE_COOKIES` | desligado | Defina `1` quando o servidor estiver atrás de HTTPS. |
+| `ECHO_DATABASE_URL` | — | Endereço de um Postgres; também aceita `DATABASE_URL` e `POSTGRES_URL`. Sem ele, o banco é o arquivo SQLite. |
 | `ECHO_TRUST_PROXY` | desligado | Defina `1` quando houver um proxy na frente, para o limite de tentativas valer por IP de quem acessa. |
 | `ECHO_SERVER_URL` | — | Endereço que a casca desktop usa nesta execução, no lugar do salvo. |
 | `ECHO_NO_LOCAL_SERVER` | desligado | Defina `1` para a casca nunca subir o servidor embutido. |

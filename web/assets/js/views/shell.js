@@ -10,6 +10,7 @@ import { createTimeline } from './timeline.js';
 
 const MEMBERS_KEY = 'echo:membros';
 const TYPING_SIGNAL_MS = 3000;
+const BANNER_DELAY_MS = 5000;
 
 // Abaixo desta largura o painel de membros vira gaveta por cima da conversa.
 const isNarrow = () => window.innerWidth <= 1000;
@@ -32,7 +33,7 @@ const report = (failure) => toast(failure.message, 'error');
 export function renderShell(root, { sendToGateway, onLogout }) {
   let shownChannelId = null;
   let lastTypingSignal = 0;
-  let connectionLost = false;
+  let bannerTimer = null;
   let membersOpen = loadMembersOpen();
 
   const sidebar = createSidebar({ onNavigate: () => setNavOpen(false), onLogout });
@@ -195,9 +196,18 @@ export function renderShell(root, { sendToGateway, onLogout }) {
         showTyping();
         break;
       case 'connection':
-        if (state.connection === 'offline') connectionLost = true;
-        if (state.connection === 'online') connectionLost = false;
-        banner.hidden = !connectionLost;
+        // Quedas curtas são normais (servidores hospedados renovam a conexão de
+        // tempos em tempos); o aviso só aparece se a reconexão demorar.
+        if (state.connection === 'online') {
+          clearTimeout(bannerTimer);
+          bannerTimer = null;
+          banner.hidden = true;
+        } else if (state.connection === 'offline' && bannerTimer === null && banner.hidden) {
+          bannerTimer = setTimeout(() => {
+            bannerTimer = null;
+            banner.hidden = false;
+          }, BANNER_DELAY_MS);
+        }
         break;
       default:
         break;
@@ -213,6 +223,7 @@ export function renderShell(root, { sendToGateway, onLogout }) {
   return {
     destroy() {
       unsubscribe();
+      clearTimeout(bannerTimer);
       sidebar.destroy();
       members.destroy();
       window.removeEventListener('focus', readIfWatching);

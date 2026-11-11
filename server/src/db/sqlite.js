@@ -1,8 +1,13 @@
 import { DatabaseSync } from 'node:sqlite';
+import { PRESENCE_FRESH_MS, PRESENCE_STALE_MS, toMessage } from './shared.js';
 
 /**
- * Cada item é uma migração; o índice + 1 vira o PRAGMA user_version.
- * Para mudar o esquema, acrescente um item novo (nunca edite um já publicado).
+ * Banco em arquivo (SQLite), para uso local: desenvolvimento e o servidor
+ * embutido do aplicativo desktop. A interface é a mesma de postgres.js; os
+ * métodos são assíncronos só para os dois bancos serem intercambiáveis.
+ *
+ * Cada item é uma migração; o índice + 1 vira o PRAGMA user_version. Para mudar
+ * o esquema, acrescente um item novo (nunca edite um já publicado).
  */
 const MIGRATIONS = [
   `
@@ -64,6 +69,16 @@ const MIGRATIONS = [
     PRIMARY KEY (user_id, channel_id)
   ) WITHOUT ROWID;
   `,
+  `
+  -- Quem está conectado, por instância do servidor (ver hub.js).
+  CREATE TABLE presence (
+    instance_id TEXT NOT NULL,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    connections INTEGER NOT NULL,
+    seen_at     INTEGER NOT NULL,
+    PRIMARY KEY (instance_id, user_id)
+  ) WITHOUT ROWID;
+  `,
 ];
 
 function migrate(db) {
@@ -81,34 +96,25 @@ function migrate(db) {
   }
 }
 
-export function isUniqueViolation(error) {
-  return error instanceof Error && /UNIQUE constraint failed/.test(error.message);
-}
-
 const SPACE_COLUMNS = 'id, name, owner_id AS ownerId, invite_code AS inviteCode';
 const USER_COLUMNS = 'u.id, u.username, u.display_name AS displayName';
 const CHANNEL_STATE_COLUMNS = `
   c.id, c.space_id AS spaceId, c.name,
   (SELECT MAX(msg.id) FROM messages msg WHERE msg.channel_id = c.id) AS lastMessageId,
   COALESCE(r.last_read_id, 0) AS lastReadId`;
+const MESSAGE_SELECT = `
+  SELECT msg.id, msg.channel_id AS channelId, msg.content, msg.created_at AS createdAt,
+         u.id AS authorId, u.username AS authorUsername, u.display_name AS authorDisplayName
+  FROM messages msg JOIN users u ON u.id = msg.author_id`;
 
-function toMessage(row) {
-  return {
-    id: row.id,
-    channelId: row.channelId,
-    content: row.content,
-    createdAt: row.createdAt,
-    author: { id: row.authorId, username: row.authorUsername, displayName: row.authorDisplayName },
-  };
-}
-
-/** Abre (e migra) o banco. Todas as consultas do servidor passam por este objeto. */
-export function openDatabase(file) {
+export function openSqliteDatabase(file) {
   const db = new DatabaseSync(file);
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA foreign_keys = ON');
   db.exec('PRAGMA busy_timeout = 5000');
   migrate(db);
+  // Um arquivo, um servidor: presença que sobrou de uma execução anterior não vale mais.
+  db.exec('DELETE FROM presence');
 
   const q = {
     insertUser: db.prepare('INSERT INTO users (username, display_name, password_hash, created_at) VALUES (?, ?, ?, ?)'),
@@ -156,12 +162,8 @@ export function openDatabase(file) {
       WHERE c.space_id = ? ORDER BY c.id`),
 
     insertMessage: db.prepare('INSERT INTO messages (channel_id, author_id, content, created_at) VALUES (?, ?, ?, ?)'),
-    messagesBefore: db.prepare(`
-      SELECT msg.id, msg.channel_id AS channelId, msg.content, msg.created_at AS createdAt,
-             u.id AS authorId, u.username AS authorUsername, u.display_name AS authorDisplayName
-      FROM messages msg JOIN users u ON u.id = msg.author_id
-      WHERE msg.channel_id = ? AND msg.id < ?
-      ORDER BY msg.id DESC LIMIT ?`),
+    messageById: db.prepare(`${MESSAGE_SELECT} WHERE msg.id = ?`),
+    messagesBefore: db.prepare(`${MESSAGE_SELECT} WHERE msg.channel_id = ? AND msg.id < ? ORDER BY msg.id DESC LIMIT ?`),
     maxMessageId: db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM messages WHERE channel_id = ?'),
 
     upsertRead: db.prepare(`
@@ -175,6 +177,17 @@ export function openDatabase(file) {
       SELECT ?, c.id, COALESCE((SELECT MAX(msg.id) FROM messages msg WHERE msg.channel_id = c.id), 0)
       FROM channels c WHERE c.space_id = ?
       ON CONFLICT (user_id, channel_id) DO NOTHING`),
+
+    isOnline: db.prepare('SELECT 1 AS ok FROM presence WHERE user_id = ? AND seen_at > ? LIMIT 1'),
+    presenceUp: db.prepare(`
+      INSERT INTO presence (instance_id, user_id, connections, seen_at) VALUES (?, ?, 1, ?)
+      ON CONFLICT (instance_id, user_id) DO UPDATE SET connections = connections + 1, seen_at = excluded.seen_at`),
+    presenceDown: db.prepare('UPDATE presence SET connections = connections - 1 WHERE instance_id = ? AND user_id = ?'),
+    presenceDropEmpty: db.prepare('DELETE FROM presence WHERE instance_id = ? AND user_id = ? AND connections <= 0'),
+    presenceTouch: db.prepare('UPDATE presence SET seen_at = ? WHERE instance_id = ?'),
+    presenceSweep: db.prepare('DELETE FROM presence WHERE seen_at <= ?'),
+    presenceClear: db.prepare('DELETE FROM presence WHERE instance_id = ?'),
+    onlineIds: db.prepare('SELECT DISTINCT user_id AS id FROM presence WHERE seen_at > ?'),
   };
 
   function transaction(work) {
@@ -189,28 +202,39 @@ export function openDatabase(file) {
     }
   }
 
+  const online = (userId) => q.isOnline.get(userId, Date.now() - PRESENCE_FRESH_MS) !== undefined;
+
   return {
-    close: () => db.close(),
+    async close() {
+      db.close();
+    },
 
     // --- usuários e sessões -------------------------------------------------
-    createUser({ username, displayName, passwordHash }) {
+    async createUser({ username, displayName, passwordHash }) {
       const { lastInsertRowid } = q.insertUser.run(username, displayName, passwordHash, Date.now());
       return q.userById.get(lastInsertRowid);
     },
-    findUserById: (id) => q.userById.get(id),
     /** Inclui passwordHash; só para o fluxo de login. */
-    findUserForLogin: (username) => q.userAuthByUsername.get(username),
+    async findUserForLogin(username) {
+      return q.userAuthByUsername.get(username);
+    },
 
-    createSession(tokenHash, userId, expiresAt) {
+    async createSession(tokenHash, userId, expiresAt) {
       q.insertSession.run(tokenHash, userId, Date.now(), expiresAt);
     },
-    findSessionUser: (tokenHash) => q.sessionUser.get(tokenHash, Date.now()),
-    deleteSession: (tokenHash) => q.deleteSession.run(tokenHash),
-    deleteExpiredSessions: () => q.deleteExpiredSessions.run(Date.now()),
+    async findSessionUser(tokenHash) {
+      return q.sessionUser.get(tokenHash, Date.now());
+    },
+    async deleteSession(tokenHash) {
+      q.deleteSession.run(tokenHash);
+    },
+    async deleteExpiredSessions() {
+      q.deleteExpiredSessions.run(Date.now());
+    },
 
     // --- rodas (spaces) -----------------------------------------------------
     /** Cria a roda, o primeiro canal e a participação do dono, tudo ou nada. */
-    createSpace({ name, ownerId, inviteCode, firstChannelName }) {
+    async createSpace({ name, ownerId, inviteCode, firstChannelName }) {
       return transaction(() => {
         const now = Date.now();
         const spaceId = q.insertSpace.run(name, ownerId, inviteCode, now).lastInsertRowid;
@@ -220,35 +244,55 @@ export function openDatabase(file) {
         return q.spaceById.get(spaceId);
       });
     },
-    findSpace: (id) => q.spaceById.get(id),
-    findSpaceByInvite: (code) => q.spaceByInvite.get(code),
-    listSpacesForUser: (userId) => q.spacesForUser.all(userId),
+    async findSpace(id) {
+      return q.spaceById.get(id);
+    },
+    async findSpaceByInvite(code) {
+      return q.spaceByInvite.get(code);
+    },
+    async listSpacesForUser(userId) {
+      return q.spacesForUser.all(userId);
+    },
 
     /** Devolve true se a pessoa entrou agora, false se já participava. */
-    addMember(spaceId, userId) {
+    async addMember(spaceId, userId) {
       return transaction(() => {
         const { changes } = q.insertMember.run(spaceId, userId, Date.now());
         if (changes > 0) q.markSpaceRead.run(userId, spaceId);
         return changes > 0;
       });
     },
-    isMember: (spaceId, userId) => q.isMember.get(spaceId, userId) !== undefined,
-    listMembers: (spaceId) => q.members.all(spaceId),
-    listMemberIds: (spaceId) => q.memberIds.all(spaceId).map((row) => row.id),
+    async isMember(spaceId, userId) {
+      return q.isMember.get(spaceId, userId) !== undefined;
+    },
+    async listMembers(spaceId) {
+      return q.members.all(spaceId);
+    },
+    async listMemberIds(spaceId) {
+      return q.memberIds.all(spaceId).map((row) => row.id);
+    },
     /** Todo mundo que divide ao menos uma roda com a pessoa (para avisos de presença). */
-    listCoMemberIds: (userId) => q.coMemberIds.all(userId, userId).map((row) => row.id),
+    async listCoMemberIds(userId) {
+      return q.coMemberIds.all(userId, userId).map((row) => row.id);
+    },
 
     // --- canais -------------------------------------------------------------
-    createChannel(spaceId, name) {
+    async createChannel(spaceId, name) {
       const { lastInsertRowid } = q.insertChannel.run(spaceId, name, Date.now());
       return { id: Number(lastInsertRowid), spaceId, name, lastMessageId: null, lastReadId: 0 };
     },
-    findChannel: (id) => q.channelById.get(id),
-    listChannelsForUser: (userId) => q.channelsForUser.all(userId),
-    listChannelsForSpace: (spaceId, userId) => q.channelsForSpace.all(userId, spaceId),
+    async findChannel(id) {
+      return q.channelById.get(id);
+    },
+    async listChannelsForUser(userId) {
+      return q.channelsForUser.all(userId);
+    },
+    async listChannelsForSpace(spaceId, userId) {
+      return q.channelsForSpace.all(userId, spaceId);
+    },
 
     // --- mensagens ----------------------------------------------------------
-    createMessage({ channelId, author, content, createdAt = Date.now() }) {
+    async createMessage({ channelId, author, content, createdAt = Date.now() }) {
       const { lastInsertRowid } = q.insertMessage.run(channelId, author.id, content, createdAt);
       return {
         id: Number(lastInsertRowid),
@@ -258,19 +302,47 @@ export function openDatabase(file) {
         author: { id: author.id, username: author.username, displayName: author.displayName },
       };
     },
+    async findMessage(id) {
+      const row = q.messageById.get(id);
+      return row ? toMessage(row) : null;
+    },
     /** Página de mensagens mais antigas que `before`, em ordem cronológica. */
-    listMessages(channelId, { before, limit }) {
+    async listMessages(channelId, { before, limit }) {
       const rows = q.messagesBefore.all(channelId, before, limit + 1);
-      const hasMore = rows.length > limit;
-      return { messages: rows.slice(0, limit).reverse().map(toMessage), hasMore };
+      return { messages: rows.slice(0, limit).reverse().map(toMessage), hasMore: rows.length > limit };
     },
 
     // --- leitura ------------------------------------------------------------
     /** Marca como lido até `messageId` (nunca volta atrás, nunca passa do que existe). */
-    markRead(userId, channelId, messageId) {
+    async markRead(userId, channelId, messageId) {
       const newest = q.maxMessageId.get(channelId).id;
       q.upsertRead.run(userId, channelId, Math.min(messageId, newest));
       return q.readState.get(userId, channelId).lastReadId;
+    },
+
+    // --- presença -----------------------------------------------------------
+    /** Registra uma conexão; devolve true se a pessoa acabou de ficar online. */
+    async presenceConnect(instanceId, userId) {
+      const wasOnline = online(userId);
+      q.presenceUp.run(instanceId, userId, Date.now());
+      return !wasOnline;
+    },
+    /** Encerra uma conexão; devolve true se a pessoa ficou offline de vez. */
+    async presenceDisconnect(instanceId, userId) {
+      q.presenceDown.run(instanceId, userId);
+      q.presenceDropEmpty.run(instanceId, userId);
+      return !online(userId);
+    },
+    /** Sinal de vida da instância; também limpa o que ficou para trás de instâncias mortas. */
+    async presenceTouch(instanceId) {
+      q.presenceTouch.run(Date.now(), instanceId);
+      q.presenceSweep.run(Date.now() - PRESENCE_STALE_MS);
+    },
+    async presenceClear(instanceId) {
+      q.presenceClear.run(instanceId);
+    },
+    async onlineUserIds() {
+      return new Set(q.onlineIds.all(Date.now() - PRESENCE_FRESH_MS).map((row) => row.id));
     },
   };
 }

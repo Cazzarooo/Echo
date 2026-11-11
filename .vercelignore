@@ -1,0 +1,9 @@
+desktop
+scripts
+dist
+.smoke
+server/data
+server/test
+Dockerfile
+abrir-echo.cmd
+electron-builder.yml

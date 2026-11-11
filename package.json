@@ -18,9 +18,11 @@
     "node": ">=22.13"
   },
   "dependencies": {
+    "pg": "^8.23.1",
     "ws": "^8.22.2"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.16",
     "electron": "^45.3.0",
     "electron-builder": "^26.18.0"
   }

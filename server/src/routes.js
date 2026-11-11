@@ -1,6 +1,6 @@
 import { hashPassword, hashToken, newInviteCode, newSessionToken, sessionCookie, sessionTokenFrom, verifyPassword } from './auth.js';
 import { SERVER_NAME, SERVER_VERSION } from './config.js';
-import { isUniqueViolation } from './db.js';
+import { isUniqueViolation } from './db/index.js';
 import { HttpError, createRateLimiter, createRouter, isSameOrigin, readJsonBody, sendJson } from './http-util.js';
 import {
   parseChannelName,
@@ -45,49 +45,46 @@ export function buildApi({ db, hub, config }) {
     return req.socket.remoteAddress ?? 'desconhecido';
   }
 
-  function currentSession(req) {
+  async function currentSession(req) {
     const token = sessionTokenFrom(req);
     if (!token) return null;
     const tokenHash = hashToken(token);
-    const user = db.findSessionUser(tokenHash);
+    const user = await db.findSessionUser(tokenHash);
     return user ? { user, tokenHash } : null;
   }
 
-  function requireUser(req) {
-    const session = currentSession(req);
+  async function requireUser(req) {
+    const session = await currentSession(req);
     if (!session) throw new HttpError(401, 'unauthenticated', 'Entre na sua conta para continuar.');
     return session.user;
   }
 
-  function startSession(userId) {
+  async function startSession(userId) {
     const token = newSessionToken();
-    db.createSession(hashToken(token), userId, Date.now() + config.sessionMaxAgeSeconds * 1000);
+    await db.createSession(hashToken(token), userId, Date.now() + config.sessionMaxAgeSeconds * 1000);
     return { 'Set-Cookie': sessionCookie(token, { maxAgeSeconds: config.sessionMaxAgeSeconds, secure: config.secureCookies }) };
   }
 
-  const withPresence = (member) => ({ ...member, online: hub.isOnline(member.id) });
+  const withPresence = (online) => (member) => ({ ...member, online: online.has(member.id) });
 
-  function describeSpace(space, userId) {
-    return {
-      ...space,
-      channels: db.listChannelsForSpace(space.id, userId),
-      members: db.listMembers(space.id).map(withPresence),
-    };
+  async function describeSpace(space, userId, online) {
+    const [channels, members] = await Promise.all([db.listChannelsForSpace(space.id, userId), db.listMembers(space.id)]);
+    return { ...space, channels, members: members.map(withPresence(online)) };
   }
 
   // Canal inexistente e canal de uma roda alheia respondem igual, para não revelar o que existe.
-  function requireChannel(channelId, userId) {
-    const channel = db.findChannel(channelId);
-    if (!channel || !db.isMember(channel.spaceId, userId)) {
+  async function requireChannel(channelId, userId) {
+    const channel = await db.findChannel(channelId);
+    if (!channel || !(await db.isMember(channel.spaceId, userId))) {
       throw new HttpError(404, 'channel_not_found', 'Canal não encontrado.');
     }
     return channel;
   }
 
-  function createSpaceWithFreshInvite(name, ownerId) {
+  async function createSpaceWithFreshInvite(name, ownerId) {
     for (let attempt = 0; attempt < 5; attempt++) {
       try {
-        return db.createSpace({ name, ownerId, inviteCode: newInviteCode(), firstChannelName: FIRST_CHANNEL_NAME });
+        return await db.createSpace({ name, ownerId, inviteCode: newInviteCode(), firstChannelName: FIRST_CHANNEL_NAME });
       } catch (error) {
         if (!isUniqueViolation(error)) throw error;
       }
@@ -112,14 +109,14 @@ export function buildApi({ db, hub, config }) {
 
     let user;
     try {
-      user = db.createUser({ username, displayName, passwordHash });
+      user = await db.createUser({ username, displayName, passwordHash });
     } catch (error) {
       if (isUniqueViolation(error)) {
         throw new HttpError(409, 'username_taken', 'Esse nome de usuário já está em uso.', { field: 'username' });
       }
       throw error;
     }
-    return { status: 201, body: { user }, headers: startSession(user.id) };
+    return { status: 201, body: { user }, headers: await startSession(user.id) };
   });
 
   router.post('/api/auth/login', async ({ req, body }) => {
@@ -128,68 +125,80 @@ export function buildApi({ db, hub, config }) {
     const username = typeof input.username === 'string' ? input.username.trim().toLowerCase() : '';
     const password = typeof input.password === 'string' ? input.password : '';
 
-    const record = username ? db.findUserForLogin(username) : undefined;
+    const record = username ? await db.findUserForLogin(username) : undefined;
     const passwordMatches = await verifyPassword(password, record ? record.passwordHash : await decoyHash);
     if (!record || !passwordMatches) {
       throw new HttpError(401, 'invalid_credentials', 'Usuário ou senha incorretos.');
     }
     const { passwordHash: _omitted, ...user } = record;
-    return { status: 200, body: { user }, headers: startSession(user.id) };
+    return { status: 200, body: { user }, headers: await startSession(user.id) };
   });
 
-  router.post('/api/auth/logout', ({ req }) => {
-    const session = currentSession(req);
+  router.post('/api/auth/logout', async ({ req }) => {
+    const session = await currentSession(req);
     if (session) {
-      db.deleteSession(session.tokenHash);
-      hub.disconnectSession(session.tokenHash);
+      await db.deleteSession(session.tokenHash);
+      await hub.disconnectSession(session.tokenHash);
     }
     return { status: 204, headers: { 'Set-Cookie': sessionCookie('', { maxAgeSeconds: 0, secure: config.secureCookies }) } };
   });
 
   /** Tudo que a interface precisa para abrir: a conta, as rodas, os canais e quem está nelas. */
-  router.get('/api/bootstrap', ({ req }) => {
-    const user = requireUser(req);
-    const channels = db.listChannelsForUser(user.id);
-    const spaces = db.listSpacesForUser(user.id).map((space) => ({
-      ...space,
-      channels: channels.filter((channel) => channel.spaceId === space.id),
-      members: db.listMembers(space.id).map(withPresence),
-    }));
-    return { status: 200, body: { user, spaces } };
+  router.get('/api/bootstrap', async ({ req }) => {
+    const user = await requireUser(req);
+    const [spaces, channels, online] = await Promise.all([
+      db.listSpacesForUser(user.id),
+      db.listChannelsForUser(user.id),
+      db.onlineUserIds(),
+    ]);
+    const memberLists = await Promise.all(spaces.map((space) => db.listMembers(space.id)));
+    return {
+      status: 200,
+      body: {
+        user,
+        spaces: spaces.map((space, index) => ({
+          ...space,
+          channels: channels.filter((channel) => channel.spaceId === space.id),
+          members: memberLists[index].map(withPresence(online)),
+        })),
+      },
+    };
   });
 
   // --- rodas e canais --------------------------------------------------------
 
   router.post('/api/spaces', async ({ req, body }) => {
-    const user = requireUser(req);
+    const user = await requireUser(req);
     throttle(writeLimiter, user.id);
     const name = parseSpaceName((await body()).name);
-    const space = describeSpace(createSpaceWithFreshInvite(name, user.id), user.id);
-    hub.sendToUser(user.id, { type: 'space_add', space });
+    const created = await createSpaceWithFreshInvite(name, user.id);
+    const space = await describeSpace(created, user.id, await db.onlineUserIds());
+    await hub.toUser(user.id, { type: 'space_add', space });
     return { status: 201, body: { space } };
   });
 
   router.post('/api/spaces/join', async ({ req, body }) => {
-    const user = requireUser(req);
+    const user = await requireUser(req);
     throttle(writeLimiter, user.id);
     const code = parseInviteCode((await body()).code);
-    const found = db.findSpaceByInvite(code);
+    const found = await db.findSpaceByInvite(code);
     if (!found) {
       throw new HttpError(404, 'invite_not_found', 'Não encontramos uma roda com esse convite.', { field: 'code' });
     }
-    const joinedNow = db.addMember(found.id, user.id);
-    const space = describeSpace(found, user.id);
+    const joinedNow = await db.addMember(found.id, user.id);
+    const online = await db.onlineUserIds();
+    const space = await describeSpace(found, user.id, online);
     if (joinedNow) {
-      hub.sendToSpace(found.id, { type: 'member_join', spaceId: found.id, member: withPresence(user) }, { exceptUserId: user.id });
-      hub.sendToUser(user.id, { type: 'space_add', space });
+      await hub.toSpace(found.id, { type: 'member_join', spaceId: found.id, member: withPresence(online)(user) }, { exceptUserId: user.id });
+      await hub.toUser(user.id, { type: 'space_add', space });
     }
     return { status: joinedNow ? 201 : 200, body: { space } };
   });
 
   router.post('/api/spaces/:id/channels', async ({ req, params, body }) => {
-    const user = requireUser(req);
-    const space = db.findSpace(params.id);
-    if (!space || !db.isMember(space.id, user.id)) {
+    const user = await requireUser(req);
+    const space = await db.findSpace(params.id);
+    if (!space || !(await db.isMember(space.id, user.id))) {
       throw new HttpError(404, 'space_not_found', 'Roda não encontrada.');
     }
     if (space.ownerId !== user.id) {
@@ -200,27 +209,27 @@ export function buildApi({ db, hub, config }) {
 
     let channel;
     try {
-      channel = db.createChannel(space.id, name);
+      channel = await db.createChannel(space.id, name);
     } catch (error) {
       if (isUniqueViolation(error)) {
         throw new HttpError(409, 'channel_exists', 'Já existe um canal com esse nome nesta roda.', { field: 'name' });
       }
       throw error;
     }
-    hub.sendToSpace(space.id, { type: 'channel_create', channel });
+    await hub.toSpace(space.id, { type: 'channel_create', channel });
     return { status: 201, body: { channel } };
   });
 
   // --- mensagens -------------------------------------------------------------
 
-  router.get('/api/channels/:id/messages', ({ req, params, url }) => {
-    const user = requireUser(req);
-    const channel = requireChannel(params.id, user.id);
+  router.get('/api/channels/:id/messages', async ({ req, params, url }) => {
+    const user = await requireUser(req);
+    const channel = await requireChannel(params.id, user.id);
     const before = url.searchParams.get('before');
     const limit = url.searchParams.get('limit');
     return {
       status: 200,
-      body: db.listMessages(channel.id, {
+      body: await db.listMessages(channel.id, {
         before: before === null ? Number.MAX_SAFE_INTEGER : parsePositiveInt(before, 'before'),
         limit: limit === null ? 50 : Math.min(100, parsePositiveInt(limit, 'limit')),
       }),
@@ -228,23 +237,23 @@ export function buildApi({ db, hub, config }) {
   });
 
   router.post('/api/channels/:id/messages', async ({ req, params, body }) => {
-    const user = requireUser(req);
-    const channel = requireChannel(params.id, user.id);
+    const user = await requireUser(req);
+    const channel = await requireChannel(params.id, user.id);
     throttle(messageLimiter, user.id);
     const content = parseMessageContent((await body()).content);
-    const message = db.createMessage({ channelId: channel.id, author: user, content });
-    db.markRead(user.id, channel.id, message.id);
-    hub.sendToSpace(channel.spaceId, { type: 'message_create', message });
+    const message = await db.createMessage({ channelId: channel.id, author: user, content });
+    await db.markRead(user.id, channel.id, message.id);
+    await hub.messageCreated(channel.spaceId, message.id);
     return { status: 201, body: { message } };
   });
 
   router.post('/api/channels/:id/ack', async ({ req, params, body }) => {
-    const user = requireUser(req);
-    const channel = requireChannel(params.id, user.id);
+    const user = await requireUser(req);
+    const channel = await requireChannel(params.id, user.id);
     const messageId = parsePositiveInt((await body()).messageId, 'messageId');
-    const lastReadId = db.markRead(user.id, channel.id, messageId);
+    const lastReadId = await db.markRead(user.id, channel.id, messageId);
     // As outras abas da mesma pessoa também deixam de mostrar o canal como não lido.
-    hub.sendToUser(user.id, { type: 'read_state', channelId: channel.id, lastReadId });
+    await hub.toUser(user.id, { type: 'read_state', channelId: channel.id, lastReadId });
     return { status: 200, body: { lastReadId } };
   });
 

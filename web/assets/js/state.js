@@ -20,7 +20,7 @@ export const state = {
 
 const listeners = new Set();
 
-/** Tópicos: spaces, active, members, unread, message, history, typing, connection. */
+/** Tópicos: spaces, active, members, unread, message, history, typing, connection, resync. */
 export function subscribe(listener) {
   listeners.add(listener);
   return () => listeners.delete(listener);
@@ -258,6 +258,10 @@ export function applyEvent(event) {
       break;
     case 'read_state':
       setRead(event.channelId, event.lastReadId);
+      break;
+    case 'resync':
+      // O servidor avisa que houve uma mudança grande demais para mandar por aqui.
+      emit('resync');
       break;
     default:
       break;

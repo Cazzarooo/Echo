@@ -77,7 +77,7 @@ const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'echo-smoke-'));
 const config = loadConfig({});
 config.port = 0;
 config.dbFile = path.join(dataDir, 'echo.sqlite');
-const server = createApp(config);
+const server = await createApp(config);
 const { port } = await server.listen();
 const serverUrl = `http://127.0.0.1:${port}`;
 
