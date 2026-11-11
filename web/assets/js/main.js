@@ -3,9 +3,10 @@ import { api } from './api.js';
 import { desktop, initDesktop } from './desktop.js';
 import { h, toast } from './dom.js';
 import { createGateway } from './gateway.js';
-import { applyEvent, findChannel, resetState, selectChannel, setBootstrap, setConnection, state, subscribe, unreadChannelCount } from './state.js';
+import { activeChannel, applyEvent, findChannel, resetState, selectChannel, setBootstrap, setConnection, state, subscribe, unreadChannelCount } from './state.js';
 import { renderAuth } from './views/auth.js';
 import { renderShell } from './views/shell.js';
+import { handleVoiceEvent, initVoice, leaveVoice, resumeVoice, syncVoicePeers } from './voice.js';
 
 const root = document.getElementById('root');
 let gateway = null;
@@ -44,13 +45,20 @@ function enter(data) {
   setBootstrap(data);
   if (!shell) shell = renderShell(root, { sendToGateway: (event) => gateway?.send(event), onLogout: logout });
   if (!gateway) {
-    gateway = createGateway({ onEvent: applyEvent, onStatus: onGatewayStatus });
+    gateway = createGateway({
+      onEvent(event) {
+        applyEvent(event);
+        handleVoiceEvent(event);
+      },
+      onStatus: onGatewayStatus,
+    });
     gateway.connect();
   }
 }
 
 /** Desmonta a sessão local: usado ao sair e quando o servidor diz que a sessão acabou. */
 function leave() {
+  leaveVoice();
   gateway?.close();
   gateway = null;
   shell?.destroy();
@@ -72,7 +80,10 @@ async function logout() {
 function onGatewayStatus(status) {
   setConnection(status);
   // A cada (re)conexão, pega a foto atual do servidor: cobre o que passou enquanto estava fora.
-  if (status === 'online') resync();
+  if (status === 'online') {
+    resync();
+    resumeVoice(); // quem estava numa chamada retoma o lugar
+  }
   // Conexão recusada pode ser sessão encerrada em outro lugar; uma consulta simples tira a dúvida.
   if (status === 'offline') checkSession();
 }
@@ -80,7 +91,7 @@ function onGatewayStatus(status) {
 async function resync() {
   try {
     setBootstrap(await api.bootstrap());
-    if (state.activeChannelId !== null) await loadLatest(state.activeChannelId);
+    if (activeChannel()?.kind === 'text') await loadLatest(state.activeChannelId);
   } catch (failure) {
     if (failure.status === 401) showAuth();
   }
@@ -118,9 +129,11 @@ subscribe((topic, detail) => {
   if (topic === 'unread' || topic === 'spaces') updateUnreadSignals();
   if (topic === 'message') notifyIfAway(detail);
   if (topic === 'resync') resync();
+  if (topic === 'voice' || topic === 'spaces') syncVoicePeers();
 });
 
 desktop.onNotificationClick((tag) => selectChannel(Number(tag)));
 
 initDesktop();
+initVoice({ sendToGateway: (event) => gateway?.send(event) });
 boot();

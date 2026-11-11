@@ -38,7 +38,8 @@ function openExternal(url) {
 
 /**
  * Prende a janela ao servidor: links para fora vão para o navegador, nada de
- * janelas novas ou webviews, e permissões (câmera, microfone etc.) negadas.
+ * janelas novas ou webviews, e só as permissões que o Echo usa: área de
+ * transferência (copiar convite) e microfone, câmera e tela (chamadas).
  */
 function lockDown(webContents, origin) {
   const leave = (event, url) => {
@@ -54,8 +55,8 @@ function lockDown(webContents, origin) {
   });
   webContents.on('will-attach-webview', (event) => event.preventDefault());
 
-  // Copiar o código de convite precisa escrever na área de transferência; o resto fica negado.
-  const allowed = new Set(['clipboard-sanitized-write']);
+  // Tudo fora desta lista fica negado, e a lista só vale para a página do servidor.
+  const allowed = new Set(['clipboard-sanitized-write', 'media', 'display-capture']);
   webContents.session.setPermissionRequestHandler((contents, permission, callback, details) => {
     callback(contents === webContents && allowed.has(permission) && sameOrigin(details.requestingUrl, origin));
   });

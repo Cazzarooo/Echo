@@ -1,12 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { WebSocket, WebSocketServer } from 'ws';
 import { hashToken, sessionTokenFrom } from './auth.js';
-import { MAX_ENVELOPE_BYTES } from './bus.js';
 import { isSameOrigin } from './http-util.js';
 
 const HEARTBEAT_MS = 30_000;
 const MAX_BUFFERED_BYTES = 1024 * 1024;
 const TYPING_MIN_INTERVAL_MS = 2_000;
+/** Quanto uma chamada espera por quem perdeu a conexão antes de dá-lo como saído. */
+const VOICE_GRACE_MS = 12_000;
+const MAX_EVENTS_PER_SECOND = 80;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
  * Gateway em tempo real (WebSocket em /gateway).
@@ -22,13 +25,22 @@ const TYPING_MIN_INTERVAL_MS = 2_000;
  *   { to: 'message', id, spaceId }         mensagem nova (cada instância a lê do banco)
  *   { to: 'presence', userId, online }     para quem divide alguma roda com a pessoa
  *   { to: 'session', tokenHash }           derruba as conexões de uma sessão encerrada
+ *   { to: 'peer', peerId, event }          para uma aba que está numa chamada
+ *
+ * Chamadas de voz: o servidor não transporta áudio nem vídeo. Ele só guarda
+ * quem está em cada canal de voz e repassa, de uma aba para outra, os sinais
+ * com que os navegadores combinam a conexão direta entre si (WebRTC). Cada aba
+ * numa chamada tem um `peerId`, escolhido por ela, que sobrevive a reconexões.
  */
-export function createHub({ db, bus }) {
+export function createHub({ db, bus, config }) {
   const instanceId = randomUUID();
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 4 * 1024 });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
   const clients = new Set();
   /** userId -> Set de conexões abertas nesta instância. */
   const clientsByUser = new Map();
+  /** peerId -> conexão desta instância que está numa chamada. */
+  const clientsByPeer = new Map();
+  const graceTimers = new Set();
 
   const warn = (what) => (error) => console.error(`[echo] gateway: ${what}:`, error.message);
 
@@ -64,7 +76,20 @@ export function createHub({ db, bus }) {
   }
 
   function attach(ws, user, tokenHash) {
-    const client = { ws, user, tokenHash, alive: true, typingAt: 0 };
+    const client = {
+      id: randomUUID(),
+      ws,
+      user,
+      tokenHash,
+      alive: true,
+      typingAt: 0,
+      voicePeerId: null,
+      voiceChannelId: null,
+      windowStart: 0,
+      windowCount: 0,
+      // Os eventos de uma conexão são tratados em fila, na ordem em que chegaram.
+      queue: Promise.resolve(),
+    };
     clients.add(client);
     let ofUser = clientsByUser.get(user.id);
     if (!ofUser) clientsByUser.set(user.id, (ofUser = new Set()));
@@ -74,7 +99,8 @@ export function createHub({ db, bus }) {
       client.alive = true;
     });
     ws.on('message', (data, isBinary) => {
-      if (!isBinary) handleClientEvent(client, data).catch(warn('evento do cliente'));
+      if (isBinary || isFlooding(client)) return;
+      client.queue = client.queue.then(() => handleClientEvent(client, data)).catch(warn('evento do cliente'));
     });
     ws.on('close', () => detach(client));
     ws.on('error', () => {}); // o 'close' vem em seguida
@@ -93,7 +119,32 @@ export function createHub({ db, bus }) {
     db.presenceDisconnect(instanceId, client.user.id)
       .then((wentOffline) => wentOffline && bus.publish({ to: 'presence', userId: client.user.id, online: false }))
       .catch(warn('encerrar presença'));
+
+    // Quem estava numa chamada ganha um tempo para reconectar (a conexão com o
+    // servidor cai de tempos em tempos; a chamada entre os navegadores, não).
+    const peerId = client.voicePeerId;
+    if (peerId) {
+      if (clientsByPeer.get(peerId) === client) clientsByPeer.delete(peerId);
+      const timer = setTimeout(() => {
+        graceTimers.delete(timer);
+        leaveVoice(peerId, client.id).catch(warn('saída de chamada'));
+      }, VOICE_GRACE_MS);
+      timer.unref();
+      graceTimers.add(timer);
+    }
   }
+
+  function isFlooding(client) {
+    const now = Date.now();
+    if (now - client.windowStart >= 1000) {
+      client.windowStart = now;
+      client.windowCount = 0;
+    }
+    client.windowCount += 1;
+    return client.windowCount > MAX_EVENTS_PER_SECOND;
+  }
+
+  // --- eventos vindos do cliente ----------------------------------------------
 
   async function handleClientEvent(client, data) {
     let event;
@@ -102,14 +153,109 @@ export function createHub({ db, bus }) {
     } catch {
       return;
     }
-    if (event?.type !== 'typing' || !Number.isSafeInteger(event.channelId)) return;
+    if (event === null || typeof event !== 'object') return;
+    switch (event.type) {
+      case 'typing':
+        return onTyping(client, event);
+      case 'voice_join':
+        return onVoiceJoin(client, event);
+      case 'voice_leave':
+        return onVoiceLeave(client);
+      case 'voice_update':
+        return onVoiceUpdate(client, event);
+      case 'voice_signal':
+        return onVoiceSignal(client, event);
+      default:
+        return undefined;
+    }
+  }
 
+  async function onTyping(client, event) {
+    if (!Number.isSafeInteger(event.channelId)) return;
     const now = Date.now();
     if (now - client.typingAt < TYPING_MIN_INTERVAL_MS) return;
     client.typingAt = now;
     const channel = await db.findChannel(event.channelId);
     if (!channel || !(await db.isMember(channel.spaceId, client.user.id))) return;
     await toSpace(channel.spaceId, { type: 'typing', channelId: channel.id, userId: client.user.id }, { exceptUserId: client.user.id });
+  }
+
+  const sendTo = (client, event) => deliver(client, JSON.stringify(event));
+
+  async function announceVoice(channelId) {
+    const channel = await db.findChannel(channelId);
+    if (!channel) return;
+    await toSpace(channel.spaceId, { type: 'voice_state', channelId, participants: await db.voiceParticipants(channelId) });
+  }
+
+  async function onVoiceJoin(client, event) {
+    if (!Number.isSafeInteger(event.channelId) || typeof event.peerId !== 'string' || !UUID.test(event.peerId)) return;
+    const channel = await db.findChannel(event.channelId);
+    if (!channel || channel.kind !== 'voice' || !(await db.isMember(channel.spaceId, client.user.id))) {
+      return sendTo(client, { type: 'voice_error', reason: 'not_found' });
+    }
+    // Uma conexão fica em uma chamada só, com um peerId só.
+    if (client.voicePeerId && client.voicePeerId !== event.peerId) await onVoiceLeave(client);
+
+    const outcome = await db.voiceJoin({
+      peerId: event.peerId,
+      connectionId: client.id,
+      instanceId,
+      channelId: channel.id,
+      userId: client.user.id,
+      limit: config.voice.maxParticipants,
+    });
+    if (outcome !== 'ok') return sendTo(client, { type: 'voice_error', reason: outcome });
+
+    const previousChannelId = client.voiceChannelId;
+    client.voicePeerId = event.peerId;
+    client.voiceChannelId = channel.id;
+    clientsByPeer.set(event.peerId, client);
+
+    sendTo(client, {
+      type: 'voice_ready',
+      channelId: channel.id,
+      peerId: event.peerId,
+      participants: await db.voiceParticipants(channel.id),
+      iceServers: config.voice.iceServers,
+    });
+    await announceVoice(channel.id);
+    if (previousChannelId && previousChannelId !== channel.id) await announceVoice(previousChannelId);
+  }
+
+  async function leaveVoice(peerId, connectionId) {
+    const channelId = await db.voiceLeave(peerId, connectionId);
+    if (channelId !== null) await announceVoice(channelId);
+  }
+
+  async function onVoiceLeave(client) {
+    const peerId = client.voicePeerId;
+    if (!peerId) return;
+    client.voicePeerId = null;
+    client.voiceChannelId = null;
+    if (clientsByPeer.get(peerId) === client) clientsByPeer.delete(peerId);
+    await leaveVoice(peerId, client.id);
+  }
+
+  // Identificador de um fluxo de câmera ou de tela, como o navegador o gera.
+  const streamId = (value) => (typeof value === 'string' && /^[\w{}-]{1,80}$/.test(value) ? value : null);
+
+  async function onVoiceUpdate(client, event) {
+    if (!client.voicePeerId) return;
+    const channelId = await db.voiceUpdate(client.voicePeerId, client.id, {
+      muted: event.muted === true,
+      camera: streamId(event.camera),
+      screen: streamId(event.screen),
+    });
+    if (channelId !== null) await announceVoice(channelId);
+  }
+
+  async function onVoiceSignal(client, event) {
+    if (!client.voicePeerId || typeof event.to !== 'string' || !UUID.test(event.to)) return;
+    if (event.data === null || typeof event.data !== 'object') return;
+    // Só entre abas que estão na mesma chamada.
+    if (!(await db.voicePeersTogether(client.voicePeerId, event.to))) return;
+    await bus.publish({ to: 'peer', peerId: event.to, event: { type: 'voice_signal', from: client.voicePeerId, data: event.data } });
   }
 
   // --- entrega às conexões desta instância ------------------------------------
@@ -153,6 +299,11 @@ export function createHub({ db, bus }) {
       case 'session':
         for (const client of clients) if (client.tokenHash === envelope.tokenHash) client.ws.close(4001, 'logout');
         break;
+      case 'peer': {
+        const client = clientsByPeer.get(envelope.peerId);
+        if (client) sendTo(client, envelope.event);
+        break;
+      }
       default:
         break;
     }
@@ -160,14 +311,8 @@ export function createHub({ db, bus }) {
 
   // --- publicação -------------------------------------------------------------
 
-  // Evento grande demais para o canal vira um pedido de "busque tudo de novo".
-  function publishEvent(envelope) {
-    const fits = Buffer.byteLength(JSON.stringify(envelope)) <= MAX_ENVELOPE_BYTES;
-    return bus.publish(fits ? envelope : { ...envelope, event: { type: 'resync' } });
-  }
-
   function toSpace(spaceId, event, { exceptUserId = null } = {}) {
-    return publishEvent({ to: 'space', id: spaceId, except: exceptUserId, event });
+    return bus.publish({ to: 'space', id: spaceId, except: exceptUserId, event });
   }
 
   const heartbeat = setInterval(() => {
@@ -179,7 +324,12 @@ export function createHub({ db, bus }) {
       client.alive = false;
       client.ws.ping();
     }
-    if (clients.size > 0) db.presenceTouch(instanceId).catch(warn('sinal de vida'));
+    if (clients.size === 0) return;
+    db.presenceTouch(instanceId).catch(warn('sinal de vida'));
+    // Renova as chamadas desta instância e avisa de quem sumiu sem se despedir.
+    db.voiceTouch(instanceId)
+      .then((channelIds) => Promise.all(channelIds.map(announceVoice)))
+      .catch(warn('sinal de vida das chamadas'));
   }, HEARTBEAT_MS);
   heartbeat.unref();
 
@@ -187,19 +337,23 @@ export function createHub({ db, bus }) {
     /** Começa a ouvir o canal de eventos. Chamar uma vez, antes de atender conexões. */
     start: () => bus.subscribe((envelope) => onEnvelope(envelope).catch(warn('entrega de evento'))),
     handleUpgrade: (req, socket, head) => handleUpgrade(req, socket, head).catch(warn('abertura de conexão')),
-    toUser: (userId, event) => publishEvent({ to: 'users', ids: [userId], event }),
+    toUser: (userId, event) => bus.publish({ to: 'users', ids: [userId], event }),
     toSpace,
-    /** Mensagem nova: vai por referência, porque o texto pode não caber no canal. */
+    /** Mensagem nova: vai por referência; cada instância busca o texto no banco. */
     messageCreated: (spaceId, messageId) => bus.publish({ to: 'message', id: messageId, spaceId }),
     /** Fecha as conexões abertas com uma sessão que acabou de sair, em qualquer instância. */
     disconnectSession: (tokenHash) => bus.publish({ to: 'session', tokenHash }),
     async close() {
       clearInterval(heartbeat);
+      for (const timer of graceTimers) clearTimeout(timer);
       for (const client of clients) client.ws.terminate();
       clients.clear();
       clientsByUser.clear();
+      clientsByPeer.clear();
       wss.close();
       await db.presenceClear(instanceId).catch(() => {});
+      const channelIds = await db.voiceClear(instanceId).catch(() => []);
+      await Promise.all(channelIds.map((channelId) => announceVoice(channelId).catch(() => {})));
     },
   };
 }

@@ -1,4 +1,4 @@
-import { PRESENCE_FRESH_MS, PRESENCE_STALE_MS, toMessage } from './shared.js';
+import { PRESENCE_FRESH_MS, PRESENCE_STALE_MS, toMessage, toVoiceState } from './shared.js';
 
 /**
  * Banco Postgres, para o servidor hospedado: lá não há disco permanente e pode
@@ -72,12 +72,37 @@ CREATE TABLE IF NOT EXISTS presence (
   seen_at     DOUBLE PRECISION NOT NULL,
   PRIMARY KEY (instance_id, user_id)
 );
+
+-- Canais de voz, e quem está em cada chamada. peer_id identifica a aba da
+-- pessoa (é com ele que os participantes se conectam entre si).
+ALTER TABLE channels ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'text';
+
+CREATE TABLE IF NOT EXISTS voice_states (
+  peer_id       TEXT PRIMARY KEY,
+  connection_id TEXT NOT NULL,
+  instance_id   TEXT NOT NULL,
+  channel_id    INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  muted         BOOLEAN NOT NULL DEFAULT FALSE,
+  camera        TEXT,
+  screen        TEXT,
+  joined_at     DOUBLE PRECISION NOT NULL,
+  seen_at       DOUBLE PRECISION NOT NULL
+);
+CREATE INDEX IF NOT EXISTS voice_states_channel ON voice_states(channel_id);
+
+-- Avisos grandes demais para o NOTIFY (ver bus.js) passam por aqui.
+CREATE TABLE IF NOT EXISTS bus_payloads (
+  id         SERIAL PRIMARY KEY,
+  body       TEXT NOT NULL,
+  created_at DOUBLE PRECISION NOT NULL
+);
 `;
 
 const SPACE_COLUMNS = 'id, name, owner_id AS "ownerId", invite_code AS "inviteCode"';
 const USER_COLUMNS = 'u.id, u.username, u.display_name AS "displayName"';
 const CHANNEL_STATE_COLUMNS = `
-  c.id, c.space_id AS "spaceId", c.name,
+  c.id, c.space_id AS "spaceId", c.name, c.kind,
   (SELECT MAX(msg.id) FROM messages msg WHERE msg.channel_id = c.id) AS "lastMessageId",
   COALESCE(r.last_read_id, 0) AS "lastReadId"`;
 const MESSAGE_SELECT = `
@@ -195,15 +220,16 @@ export async function openPostgresDatabase(driver) {
       ).map((row) => row.id),
 
     // --- canais -------------------------------------------------------------
-    async createChannel(spaceId, name) {
-      const { id } = await one('INSERT INTO channels (space_id, name, created_at) VALUES ($1, $2, $3) RETURNING id', [
+    async createChannel(spaceId, name, kind = 'text') {
+      const { id } = await one('INSERT INTO channels (space_id, name, kind, created_at) VALUES ($1, $2, $3, $4) RETURNING id', [
         spaceId,
         name,
+        kind,
         Date.now(),
       ]);
-      return { id, spaceId, name, lastMessageId: null, lastReadId: 0 };
+      return { id, spaceId, name, kind, lastMessageId: null, lastReadId: 0 };
     },
-    findChannel: (id) => one('SELECT id, space_id AS "spaceId", name FROM channels WHERE id = $1', [id]),
+    findChannel: (id) => one('SELECT id, space_id AS "spaceId", name, kind FROM channels WHERE id = $1', [id]),
     listChannelsForUser: (userId) =>
       all(
         `SELECT ${CHANNEL_STATE_COLUMNS}
@@ -294,6 +320,95 @@ export async function openPostgresDatabase(driver) {
     async onlineUserIds() {
       const rows = await all('SELECT DISTINCT user_id AS id FROM presence WHERE seen_at > $1', [Date.now() - PRESENCE_FRESH_MS]);
       return new Set(rows.map((row) => row.id));
+    },
+
+    // --- chamadas de voz ----------------------------------------------------
+    /**
+     * Põe (ou repõe, numa reconexão) a aba `peerId` na chamada do canal.
+     * Devolve 'ok', 'full' (chamada lotada) ou 'taken' (o peerId é de outra pessoa).
+     */
+    voiceJoin: ({ peerId, connectionId, instanceId, channelId, userId, limit }) =>
+      driver.transaction(async (query) => {
+        // Uma entrada por vez em cada canal, para o limite de participantes valer de verdade.
+        await query('SELECT pg_advisory_xact_lock(7, $1)', [channelId]);
+        const [owner] = await query('SELECT user_id AS "userId" FROM voice_states WHERE peer_id = $1', [peerId]);
+        if (owner && owner.userId !== userId) return 'taken';
+        const [{ n }] = await query(
+          'SELECT COUNT(*)::integer AS n FROM voice_states WHERE channel_id = $1 AND seen_at > $2 AND peer_id <> $3',
+          [channelId, Date.now() - PRESENCE_FRESH_MS, peerId],
+        );
+        if (n >= limit) return 'full';
+        const now = Date.now();
+        await query(
+          `INSERT INTO voice_states (peer_id, connection_id, instance_id, channel_id, user_id, joined_at, seen_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $6)
+           ON CONFLICT (peer_id) DO UPDATE SET
+             connection_id = EXCLUDED.connection_id, instance_id = EXCLUDED.instance_id, seen_at = EXCLUDED.seen_at,
+             muted = CASE WHEN voice_states.channel_id = EXCLUDED.channel_id THEN voice_states.muted ELSE FALSE END,
+             camera = CASE WHEN voice_states.channel_id = EXCLUDED.channel_id THEN voice_states.camera ELSE NULL END,
+             screen = CASE WHEN voice_states.channel_id = EXCLUDED.channel_id THEN voice_states.screen ELSE NULL END,
+             joined_at = CASE WHEN voice_states.channel_id = EXCLUDED.channel_id THEN voice_states.joined_at ELSE EXCLUDED.joined_at END,
+             channel_id = EXCLUDED.channel_id`,
+          [peerId, connectionId, instanceId, channelId, userId, now],
+        );
+        return 'ok';
+      }),
+    /** Tira a aba da chamada, se ela ainda pertence a esta conexão. Devolve o canal, ou null. */
+    async voiceLeave(peerId, connectionId) {
+      const row = await one('DELETE FROM voice_states WHERE peer_id = $1 AND connection_id = $2 RETURNING channel_id AS "channelId"', [
+        peerId,
+        connectionId,
+      ]);
+      return row ? row.channelId : null;
+    },
+    async voiceUpdate(peerId, connectionId, { muted, camera, screen }) {
+      const row = await one(
+        `UPDATE voice_states SET muted = $1, camera = $2, screen = $3
+         WHERE peer_id = $4 AND connection_id = $5 RETURNING channel_id AS "channelId"`,
+        [muted, camera, screen, peerId, connectionId],
+      );
+      return row ? row.channelId : null;
+    },
+    async voiceParticipants(channelId) {
+      const rows = await all(
+        `SELECT peer_id AS "peerId", user_id AS "userId", muted, camera, screen
+         FROM voice_states WHERE channel_id = $1 AND seen_at > $2 ORDER BY joined_at, peer_id`,
+        [channelId, Date.now() - PRESENCE_FRESH_MS],
+      );
+      return rows.map(toVoiceState);
+    },
+    /** As duas abas estão na mesma chamada? (Só assim uma pode mandar sinal à outra.) */
+    async voicePeersTogether(peerA, peerB) {
+      const row = await one(
+        `SELECT COUNT(DISTINCT channel_id)::integer AS channels, COUNT(*)::integer AS peers
+         FROM voice_states WHERE peer_id IN ($1, $2) AND seen_at > $3`,
+        [peerA, peerB, Date.now() - PRESENCE_FRESH_MS],
+      );
+      return row.peers === 2 && row.channels === 1;
+    },
+    /** Sinal de vida das chamadas desta instância; devolve os canais de onde saiu gente que sumiu. */
+    async voiceTouch(instanceId) {
+      await all('UPDATE voice_states SET seen_at = $1 WHERE instance_id = $2', [Date.now(), instanceId]);
+      const rows = await all('DELETE FROM voice_states WHERE seen_at <= $1 RETURNING channel_id AS "channelId"', [
+        Date.now() - PRESENCE_FRESH_MS,
+      ]);
+      return [...new Set(rows.map((row) => row.channelId))];
+    },
+    async voiceClear(instanceId) {
+      const rows = await all('DELETE FROM voice_states WHERE instance_id = $1 RETURNING channel_id AS "channelId"', [instanceId]);
+      return [...new Set(rows.map((row) => row.channelId))];
+    },
+    /** Quem está em chamada nos canais que a pessoa enxerga: [{ channelId, peerId, userId, ... }]. */
+    async listVoiceStatesForUser(userId) {
+      const rows = await all(
+        `SELECT v.channel_id AS "channelId", v.peer_id AS "peerId", v.user_id AS "userId", v.muted, v.camera, v.screen
+         FROM voice_states v
+         JOIN channels c ON c.id = v.channel_id
+         JOIN space_members m ON m.space_id = c.space_id AND m.user_id = $1
+         WHERE v.seen_at > $2 ORDER BY v.joined_at, v.peer_id`,
+        [userId, Date.now() - PRESENCE_FRESH_MS],
+      );
+      return rows.map((row) => ({ channelId: row.channelId, ...toVoiceState(row) }));
     },
   };
 }

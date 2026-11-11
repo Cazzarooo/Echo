@@ -1,4 +1,4 @@
-const { app, BrowserWindow, nativeTheme, screen } = require('electron');
+const { app, BrowserWindow, desktopCapturer, nativeTheme, screen } = require('electron');
 const path = require('node:path');
 const { lockDown } = require('./security');
 
@@ -59,6 +59,14 @@ function createMainWindow({ origin, settings, icon }) {
     },
   });
   lockDown(window.webContents, origin);
+
+  // Compartilhar a tela numa chamada: por enquanto entrega a tela principal inteira (sem seletor de janela).
+  window.webContents.session.setDisplayMediaRequestHandler((_request, callback) => {
+    desktopCapturer
+      .getSources({ types: ['screen'] })
+      .then((sources) => callback(sources.length > 0 ? { video: sources[0] } : {}))
+      .catch(() => callback({}));
+  });
 
   let saveTimer = null;
   const rememberBounds = () => {

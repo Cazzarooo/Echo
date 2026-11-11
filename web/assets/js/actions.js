@@ -71,8 +71,8 @@ export async function joinSpace(code) {
   selectSpace(space.id);
 }
 
-export async function createChannel(spaceId, name) {
-  const { channel } = await api.createChannel(spaceId, name);
+export async function createChannel(spaceId, name, kind = 'text') {
+  const { channel } = await api.createChannel(spaceId, name, kind);
   addChannel(channel);
   selectChannel(channel.id);
 }

@@ -79,16 +79,19 @@ export function promptJoinSpace() {
   });
 }
 
-export function promptCreateChannel(space) {
+export function promptCreateChannel(space, kind = 'text') {
+  const voice = kind === 'voice';
   openFormDialog({
-    title: 'Abrir um canal',
-    text: `Um canal separa um assunto dentro de ${space.name}.`,
+    title: voice ? 'Abrir um canal de voz' : 'Abrir um canal',
+    text: voice
+      ? `Num canal de voz o pessoal de ${space.name} conversa falando, com câmera e tela se quiser.`
+      : `Um canal separa um assunto dentro de ${space.name}.`,
     label: 'Nome do canal',
-    placeholder: 'avisos',
+    placeholder: voice ? 'bate-papo' : 'avisos',
     hint: 'Espaços viram hífen e tudo fica em minúsculas.',
     maxLength: 32,
     submitLabel: 'Abrir canal',
-    onSubmit: (name) => createChannel(space.id, name),
+    onSubmit: (name) => createChannel(space.id, name, kind),
   });
 }
 

@@ -23,7 +23,7 @@ function applySecurityHeaders(res) {
  */
 export async function createApp(config) {
   const { db, driver } = await openDatabase(config);
-  const hub = createHub({ db, bus: driver ? createPostgresBus(driver) : createLocalBus() });
+  const hub = createHub({ db, bus: driver ? createPostgresBus(driver) : createLocalBus(), config });
   await hub.start();
   const api = buildApi({ db, hub, config });
 

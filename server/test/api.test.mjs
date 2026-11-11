@@ -1,7 +1,7 @@
 // Testes de ponta a ponta: sobem o servidor de verdade numa porta livre, com um
 // banco temporário, e falam com ele por HTTP e WebSocket como um cliente faria.
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -27,6 +27,7 @@ before(async () => {
     config.postgres = { driver: await createPgliteDriver() };
   }
   config.rateLimits.auth.limit = 1000; // todos os testes saem do mesmo IP
+  config.voice.maxParticipants = 2; // para o teste de chamada lotada caber em três contas
   app = await createApp(config);
   const { port } = await app.listen();
   base = `http://127.0.0.1:${port}`;
@@ -248,7 +249,7 @@ test('mensagem chega em tempo real e controla o que está lido', async () => {
     const boot = await person.client.get('/api/bootstrap');
     return boot.body.spaces[0].channels[0];
   };
-  assert.deepEqual(await channelOf(ana), { id: channelId, spaceId: space.id, name: 'geral', lastMessageId: message.id, lastReadId: message.id });
+  assert.deepEqual(await channelOf(ana), { id: channelId, spaceId: space.id, name: 'geral', kind: 'text', lastMessageId: message.id, lastReadId: message.id });
   const unreadForBeto = await channelOf(beto);
   assert.equal(unreadForBeto.lastMessageId, message.id);
   assert.ok(unreadForBeto.lastReadId < message.id, 'para o Beto a mensagem ainda é nova');
@@ -391,4 +392,96 @@ test('a interface web sai com CSP e não deixa escapar da pasta', async () => {
   ]) {
     assert.equal((await client.get(escape)).status, 404, escape);
   }
+});
+
+test('canal de voz: entrar, ver quem está, combinar a conexão e sair', async () => {
+  const ana = await signUp('ana');
+  const beto = await signUp('beto');
+  const carla = await signUp('carla');
+  const dora = await signUp('dora');
+  const space = await createSpace(ana);
+  await join(beto, space);
+  await join(dora, space);
+
+  const created = await ana.client.post(`/api/spaces/${space.id}/channels`, { name: 'Bate-papo', kind: 'voice' });
+  assert.equal(created.status, 201);
+  assert.deepEqual(created.body.channel, { id: created.body.channel.id, spaceId: space.id, name: 'bate-papo', kind: 'voice', lastMessageId: null, lastReadId: 0, voice: [] });
+  const voiceId = created.body.channel.id;
+  assert.equal((await ana.client.post(`/api/spaces/${space.id}/channels`, { name: 'outro', kind: 'video' })).status, 422);
+  // Canal de voz não guarda mensagens.
+  assert.equal((await ana.client.post(`/api/channels/${voiceId}/messages`, { content: 'oi' })).status, 409);
+  assert.equal((await ana.client.get(`/api/channels/${voiceId}/messages`)).status, 409);
+
+  const [anaGw, betoGw, carlaGw, doraGw] = [ana, beto, carla, dora].map((person) => openGateway(person.client));
+  await Promise.all([anaGw.opened, betoGw.opened, carlaGw.opened, doraGw.opened]);
+  const send = (gateway, event) => gateway.ws.send(JSON.stringify(event));
+  const anaPeer = randomUUID();
+  const betoPeer = randomUUID();
+  const person = (peerId, user, extra = {}) => ({ peerId, userId: user.id, muted: false, camera: null, screen: null, ...extra });
+  const stateWith = (count) => (event) => event.type === 'voice_state' && event.channelId === voiceId && event.participants.length === count;
+
+  // Num canal de texto, ou com identificador inválido, não há chamada.
+  send(anaGw, { type: 'voice_join', channelId: space.channels[0].id, peerId: anaPeer });
+  assert.equal((await anaGw.next((event) => event.type === 'voice_error')).reason, 'not_found');
+  send(anaGw, { type: 'voice_join', channelId: voiceId, peerId: 'nao-e-uuid' });
+
+  send(anaGw, { type: 'voice_join', channelId: voiceId, peerId: anaPeer });
+  const anaReady = await anaGw.next((event) => event.type === 'voice_ready');
+  assert.equal(anaReady.channelId, voiceId);
+  assert.deepEqual(anaReady.participants, [person(anaPeer, ana.user)]);
+  assert.ok(Array.isArray(anaReady.iceServers) && anaReady.iceServers.length > 0);
+
+  send(betoGw, { type: 'voice_join', channelId: voiceId, peerId: betoPeer });
+  const betoReady = await betoGw.next((event) => event.type === 'voice_ready');
+  assert.deepEqual(betoReady.participants, [person(anaPeer, ana.user), person(betoPeer, beto.user)]);
+  assert.deepEqual((await anaGw.next(stateWith(2))).participants, betoReady.participants);
+  // Quem é da roda mas não está na chamada também vê quem entrou.
+  await doraGw.next(stateWith(2));
+
+  // A chamada está no limite (2 neste teste): a Dora não cabe; a Carla nem é da roda.
+  send(doraGw, { type: 'voice_join', channelId: voiceId, peerId: randomUUID() });
+  assert.equal((await doraGw.next((event) => event.type === 'voice_error')).reason, 'full');
+  const carlaPeer = randomUUID();
+  send(carlaGw, { type: 'voice_join', channelId: voiceId, peerId: carlaPeer });
+  assert.equal((await carlaGw.next((event) => event.type === 'voice_error')).reason, 'not_found');
+  // Ninguém toma o lugar de outra pessoa usando o identificador dela.
+  send(doraGw, { type: 'voice_join', channelId: voiceId, peerId: anaPeer });
+  assert.equal((await doraGw.next((event) => event.type === 'voice_error')).reason, 'taken');
+
+  // Sinais de conexão passam de uma aba à outra, inclusive os grandes (ofertas com vídeo).
+  const offer = { description: { type: 'offer', sdp: 'v=0\r\n' + 'a=candidate '.repeat(1500) } };
+  send(betoGw, { type: 'voice_signal', to: anaPeer, data: offer });
+  assert.deepEqual(await anaGw.next((event) => event.type === 'voice_signal'), { type: 'voice_signal', from: betoPeer, data: offer });
+  send(anaGw, { type: 'voice_signal', to: betoPeer, data: { candidate: { candidate: 'x' } } });
+  assert.equal((await betoGw.next((event) => event.type === 'voice_signal')).from, anaPeer);
+  // Quem está fora da chamada não consegue mandar sinal para dentro dela.
+  send(carlaGw, { type: 'voice_signal', to: anaPeer, data: { description: { type: 'offer', sdp: 'intruso' } } });
+  send(doraGw, { type: 'voice_signal', to: anaPeer, data: { description: { type: 'offer', sdp: 'intruso' } } });
+
+  // Microfone, câmera e tela aparecem para todos.
+  send(anaGw, { type: 'voice_update', muted: true, camera: 'stream-camera-1', screen: '<script>' });
+  const updated = await betoGw.next((event) => event.type === 'voice_state' && event.participants.some((item) => item.muted));
+  assert.deepEqual(updated.participants, [person(anaPeer, ana.user, { muted: true, camera: 'stream-camera-1' }), person(betoPeer, beto.user)]);
+
+  const boot = await dora.client.get('/api/bootstrap');
+  assert.deepEqual(boot.body.spaces[0].channels.find((channel) => channel.id === voiceId).voice, updated.participants);
+
+  // Queda de conexão não derruba a chamada: ao reconectar com o mesmo identificador, o lugar continua lá.
+  await betoGw.close();
+  const betoAgain = openGateway(beto.client);
+  await betoAgain.opened;
+  send(betoAgain, { type: 'voice_join', channelId: voiceId, peerId: betoPeer });
+  assert.equal((await betoAgain.next((event) => event.type === 'voice_ready')).participants.length, 2);
+  send(anaGw, { type: 'voice_signal', to: betoPeer, data: { candidate: { candidate: 'depois-da-reconexao' } } });
+  assert.equal((await betoAgain.next((event) => event.type === 'voice_signal')).data.candidate.candidate, 'depois-da-reconexao');
+
+  send(betoAgain, { type: 'voice_leave' });
+  const afterLeave = (event) => stateWith(1)(event) && event.participants[0].muted; // o estado de 1 pessoa do começo ainda está na fila
+  assert.deepEqual((await anaGw.next(afterLeave)).participants, [person(anaPeer, ana.user, { muted: true, camera: 'stream-camera-1' })]);
+
+  await pause(150);
+  assert.equal(anaGw.events.some((event) => event.type === 'voice_signal'), false, 'sinais de quem está fora não chegam');
+  assert.equal(carlaGw.events.some((event) => event.type.startsWith('voice_') && event.type !== 'voice_error'), false, 'quem não é da roda não vê a chamada');
+
+  await Promise.all([anaGw.close(), betoAgain.close(), carlaGw.close(), doraGw.close()]);
 });

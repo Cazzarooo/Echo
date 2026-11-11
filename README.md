@@ -87,6 +87,7 @@ npm run smoke
 | `ECHO_DATA_DIR` | `server/data` | Pasta do banco de dados. |
 | `ECHO_SECURE_COOKIES` | desligado | Defina `1` quando o servidor estiver atrás de HTTPS. |
 | `ECHO_DATABASE_URL` | — | Endereço de um Postgres; também aceita `DATABASE_URL` e `POSTGRES_URL`. Sem ele, o banco é o arquivo SQLite. |
+| `ECHO_ICE_SERVERS` | STUN público | Lista JSON de servidores STUN/TURN usados nas chamadas. |
 | `ECHO_TRUST_PROXY` | desligado | Defina `1` quando houver um proxy na frente, para o limite de tentativas valer por IP de quem acessa. |
 | `ECHO_SERVER_URL` | — | Endereço que a casca desktop usa nesta execução, no lugar do salvo. |
 | `ECHO_NO_LOCAL_SERVER` | desligado | Defina `1` para a casca nunca subir o servidor embutido. |
@@ -99,9 +100,19 @@ O servidor fala HTTP puro. Para usar fora da sua máquina, coloque-o atrás de u
 - **Sessão em cookie `HttpOnly`.** O JavaScript da página nunca vê o token; no banco fica só o hash dele. Senhas passam por scrypt.
 - **A casca não tem interface própria.** Ela carrega `<servidor>/app` numa janela isolada (sem Node, em sandbox) e expõe `window.EchoDesktop` pelo preload: avisos do sistema, indicador de não lidas, cores da janela e preferências. O processo principal só atende chamadas vindas da página do servidor configurado.
 
+## Chamadas de voz, vídeo e tela
+
+Cada roda pode ter canais de voz. Quem entra fala com os outros, pode ligar a câmera e compartilhar a tela.
+
+- **A mídia vai direto de um navegador para o outro** (WebRTC), sem passar pelo servidor. O servidor só guarda quem está em cada chamada e repassa os sinais com que os navegadores combinam a conexão.
+- **Limite de 8 pessoas por chamada.** Cada participante envia para todos os outros, então a qualidade cai conforme o grupo cresce; até uns 5 ou 6 costuma ir bem.
+- **Redes muito fechadas podem não conectar.** O padrão usa só um servidor STUN público. Para cobrir essas redes, informe um servidor TURN em `ECHO_ICE_SERVERS` (uma lista JSON no formato de `iceServers` do WebRTC).
+- **Reconexão não derruba a chamada.** Se a conexão com o servidor cair e voltar em até 12 segundos, a pessoa mantém o lugar; a conversa entre os navegadores nem é interrompida.
+
 ## O que ainda não tem
 
-- Editar e apagar mensagens, mensagens diretas, anexos, busca, voz e vídeo.
+- Editar e apagar mensagens, mensagens diretas, anexos e busca.
+- Nas chamadas: indicador de quem está falando, escolha de microfone/câmera e, no aplicativo desktop, escolha de qual janela compartilhar (hoje vai a tela inteira).
 - Papéis e moderação: hoje só quem criou a roda abre canais, e não dá para sair de uma roda nem trocar o convite.
 - Avisos do sistema no navegador (existem só no aplicativo desktop).
 - Atualização automática e assinatura digital do aplicativo.

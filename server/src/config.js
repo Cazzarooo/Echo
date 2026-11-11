@@ -9,6 +9,20 @@ export const PROJECT_ROOT = path.resolve(here, '..', '..');
 export const SERVER_NAME = 'echo';
 export const SERVER_VERSION = '0.1.0';
 
+const DEFAULT_ICE_SERVERS = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }];
+
+function parseIceServers(json) {
+  if (!json) return DEFAULT_ICE_SERVERS;
+  try {
+    const servers = JSON.parse(json);
+    if (Array.isArray(servers) && servers.every((server) => server && typeof server === 'object' && server.urls)) return servers;
+  } catch {
+    /* cai no aviso abaixo */
+  }
+  console.error('[echo] ECHO_ICE_SERVERS não é uma lista JSON válida; usando o padrão.');
+  return DEFAULT_ICE_SERVERS;
+}
+
 /**
  * Lê a configuração do ambiente.
  *
@@ -17,6 +31,7 @@ export const SERVER_VERSION = '0.1.0';
  * ECHO_DATA_DIR        pasta do banco de dados
  * ECHO_DATABASE_URL    endereço de um Postgres (também aceita DATABASE_URL e POSTGRES_URL)
  * ECHO_SECURE_COOKIES  "1" quando o servidor fica atrás de HTTPS
+ * ECHO_ICE_SERVERS     lista JSON de servidores STUN/TURN para as chamadas de voz
  * ECHO_TRUST_PROXY     "1" quando há um proxy na frente (para limitar tentativas pelo IP real)
  */
 export function loadConfig(env = process.env) {
@@ -52,6 +67,16 @@ export function loadConfig(env = process.env) {
     /** Atrás de um proxy (hospedagem com HTTPS), o IP de quem acessa vem no cabeçalho X-Forwarded-For. */
     trustProxy: env.ECHO_TRUST_PROXY === '1',
     sessionMaxAgeSeconds: 30 * 24 * 60 * 60,
+    voice: {
+      /** As chamadas são diretas entre os participantes; com muita gente a qualidade cai. */
+      maxParticipants: 8,
+      /**
+       * Servidores que ajudam os navegadores a se encontrarem. O padrão é um
+       * STUN público; ECHO_ICE_SERVERS (JSON) permite acrescentar um TURN,
+       * que faz a chamada funcionar também em redes mais fechadas.
+       */
+      iceServers: parseIceServers(env.ECHO_ICE_SERVERS),
+    },
     rateLimits: {
       // Cadastro e login, por endereço IP.
       auth: { limit: 20, windowMs: 5 * 60_000 },

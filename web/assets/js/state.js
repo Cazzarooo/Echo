@@ -20,7 +20,7 @@ export const state = {
 
 const listeners = new Set();
 
-/** Tópicos: spaces, active, members, unread, message, history, typing, connection, resync. */
+/** Tópicos: spaces, active, members, unread, message, history, typing, connection, resync, voice. */
 export function subscribe(listener) {
   listeners.add(listener);
   return () => listeners.delete(listener);
@@ -259,6 +259,15 @@ export function applyEvent(event) {
     case 'read_state':
       setRead(event.channelId, event.lastReadId);
       break;
+    case 'voice_state': {
+      // Quem está na chamada de um canal de voz (a lista inteira, a cada mudança).
+      const found = findChannel(event.channelId);
+      if (found) {
+        found.channel.voice = event.participants;
+        emit('voice');
+      }
+      break;
+    }
     case 'resync':
       // O servidor avisa que houve uma mudança grande demais para mandar por aqui.
       emit('resync');

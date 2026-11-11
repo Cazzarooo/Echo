@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { PRESENCE_FRESH_MS, PRESENCE_STALE_MS, toMessage } from './shared.js';
+import { PRESENCE_FRESH_MS, PRESENCE_STALE_MS, toMessage, toVoiceState } from './shared.js';
 
 /**
  * Banco em arquivo (SQLite), para uso local: desenvolvimento e o servidor
@@ -79,6 +79,24 @@ const MIGRATIONS = [
     PRIMARY KEY (instance_id, user_id)
   ) WITHOUT ROWID;
   `,
+  `
+  -- Canais de voz, e quem está em cada chamada. peer_id identifica a aba da
+  -- pessoa (é com ele que os participantes se conectam entre si).
+  ALTER TABLE channels ADD COLUMN kind TEXT NOT NULL DEFAULT 'text';
+
+  CREATE TABLE voice_states (
+    peer_id       TEXT PRIMARY KEY,
+    connection_id TEXT NOT NULL,
+    instance_id   TEXT NOT NULL,
+    channel_id    INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+    user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    muted         INTEGER NOT NULL DEFAULT 0,
+    camera        TEXT,
+    screen        TEXT,
+    seen_at       INTEGER NOT NULL
+  );
+  CREATE INDEX voice_states_channel ON voice_states(channel_id);
+  `,
 ];
 
 function migrate(db) {
@@ -99,7 +117,7 @@ function migrate(db) {
 const SPACE_COLUMNS = 'id, name, owner_id AS ownerId, invite_code AS inviteCode';
 const USER_COLUMNS = 'u.id, u.username, u.display_name AS displayName';
 const CHANNEL_STATE_COLUMNS = `
-  c.id, c.space_id AS spaceId, c.name,
+  c.id, c.space_id AS spaceId, c.name, c.kind,
   (SELECT MAX(msg.id) FROM messages msg WHERE msg.channel_id = c.id) AS lastMessageId,
   COALESCE(r.last_read_id, 0) AS lastReadId`;
 const MESSAGE_SELECT = `
@@ -115,6 +133,7 @@ export function openSqliteDatabase(file) {
   migrate(db);
   // Um arquivo, um servidor: presença que sobrou de uma execução anterior não vale mais.
   db.exec('DELETE FROM presence');
+  db.exec('DELETE FROM voice_states');
 
   const q = {
     insertUser: db.prepare('INSERT INTO users (username, display_name, password_hash, created_at) VALUES (?, ?, ?, ?)'),
@@ -147,8 +166,8 @@ export function openSqliteDatabase(file) {
       FROM space_members mine JOIN space_members other ON other.space_id = mine.space_id
       WHERE mine.user_id = ? AND other.user_id <> ?`),
 
-    insertChannel: db.prepare('INSERT INTO channels (space_id, name, created_at) VALUES (?, ?, ?)'),
-    channelById: db.prepare('SELECT id, space_id AS spaceId, name FROM channels WHERE id = ?'),
+    insertChannel: db.prepare('INSERT INTO channels (space_id, name, kind, created_at) VALUES (?, ?, ?, ?)'),
+    channelById: db.prepare('SELECT id, space_id AS spaceId, name, kind FROM channels WHERE id = ?'),
     channelsForUser: db.prepare(`
       SELECT ${CHANNEL_STATE_COLUMNS}
       FROM channels c
@@ -188,6 +207,36 @@ export function openSqliteDatabase(file) {
     presenceSweep: db.prepare('DELETE FROM presence WHERE seen_at <= ?'),
     presenceClear: db.prepare('DELETE FROM presence WHERE instance_id = ?'),
     onlineIds: db.prepare('SELECT DISTINCT user_id AS id FROM presence WHERE seen_at > ?'),
+
+    voiceOwner: db.prepare('SELECT user_id AS userId FROM voice_states WHERE peer_id = ?'),
+    voiceCount: db.prepare('SELECT COUNT(*) AS n FROM voice_states WHERE channel_id = ? AND seen_at > ? AND peer_id <> ?'),
+    voiceUpsert: db.prepare(`
+      INSERT INTO voice_states (peer_id, connection_id, instance_id, channel_id, user_id, muted, camera, screen, seen_at)
+      VALUES (?, ?, ?, ?, ?, 0, NULL, NULL, ?)
+      ON CONFLICT (peer_id) DO UPDATE SET
+        connection_id = excluded.connection_id, instance_id = excluded.instance_id, seen_at = excluded.seen_at,
+        muted = CASE WHEN channel_id = excluded.channel_id THEN muted ELSE 0 END,
+        camera = CASE WHEN channel_id = excluded.channel_id THEN camera ELSE NULL END,
+        screen = CASE WHEN channel_id = excluded.channel_id THEN screen ELSE NULL END,
+        channel_id = excluded.channel_id`),
+    voiceChannel: db.prepare('SELECT channel_id AS channelId FROM voice_states WHERE peer_id = ? AND connection_id = ?'),
+    voiceDelete: db.prepare('DELETE FROM voice_states WHERE peer_id = ? AND connection_id = ?'),
+    voiceUpdate: db.prepare('UPDATE voice_states SET muted = ?, camera = ?, screen = ? WHERE peer_id = ? AND connection_id = ?'),
+    voiceInChannel: db.prepare(`
+      SELECT peer_id AS peerId, user_id AS userId, muted, camera, screen
+      FROM voice_states WHERE channel_id = ? AND seen_at > ? ORDER BY rowid`),
+    voicePair: db.prepare('SELECT COUNT(DISTINCT channel_id) AS channels, COUNT(*) AS peers FROM voice_states WHERE peer_id IN (?, ?) AND seen_at > ?'),
+    voiceTouch: db.prepare('UPDATE voice_states SET seen_at = ? WHERE instance_id = ?'),
+    voiceStale: db.prepare('SELECT DISTINCT channel_id AS channelId FROM voice_states WHERE seen_at <= ?'),
+    voiceSweep: db.prepare('DELETE FROM voice_states WHERE seen_at <= ?'),
+    voiceOfInstance: db.prepare('SELECT DISTINCT channel_id AS channelId FROM voice_states WHERE instance_id = ?'),
+    voiceClear: db.prepare('DELETE FROM voice_states WHERE instance_id = ?'),
+    voiceForUser: db.prepare(`
+      SELECT v.channel_id AS channelId, v.peer_id AS peerId, v.user_id AS userId, v.muted, v.camera, v.screen
+      FROM voice_states v
+      JOIN channels c ON c.id = v.channel_id
+      JOIN space_members m ON m.space_id = c.space_id AND m.user_id = ?
+      WHERE v.seen_at > ?`),
   };
 
   function transaction(work) {
@@ -238,7 +287,7 @@ export function openSqliteDatabase(file) {
       return transaction(() => {
         const now = Date.now();
         const spaceId = q.insertSpace.run(name, ownerId, inviteCode, now).lastInsertRowid;
-        q.insertChannel.run(spaceId, firstChannelName, now);
+        q.insertChannel.run(spaceId, firstChannelName, 'text', now);
         q.insertMember.run(spaceId, ownerId, now);
         q.markSpaceRead.run(ownerId, spaceId);
         return q.spaceById.get(spaceId);
@@ -277,9 +326,9 @@ export function openSqliteDatabase(file) {
     },
 
     // --- canais -------------------------------------------------------------
-    async createChannel(spaceId, name) {
-      const { lastInsertRowid } = q.insertChannel.run(spaceId, name, Date.now());
-      return { id: Number(lastInsertRowid), spaceId, name, lastMessageId: null, lastReadId: 0 };
+    async createChannel(spaceId, name, kind = 'text') {
+      const { lastInsertRowid } = q.insertChannel.run(spaceId, name, kind, Date.now());
+      return { id: Number(lastInsertRowid), spaceId, name, kind, lastMessageId: null, lastReadId: 0 };
     },
     async findChannel(id) {
       return q.channelById.get(id);
@@ -343,6 +392,59 @@ export function openSqliteDatabase(file) {
     },
     async onlineUserIds() {
       return new Set(q.onlineIds.all(Date.now() - PRESENCE_FRESH_MS).map((row) => row.id));
+    },
+
+    // --- chamadas de voz ----------------------------------------------------
+    /**
+     * Põe (ou repõe, numa reconexão) a aba `peerId` na chamada do canal.
+     * Devolve 'ok', 'full' (chamada lotada) ou 'taken' (o peerId é de outra pessoa).
+     */
+    async voiceJoin({ peerId, connectionId, instanceId, channelId, userId, limit }) {
+      return transaction(() => {
+        const owner = q.voiceOwner.get(peerId);
+        if (owner && owner.userId !== userId) return 'taken';
+        if (q.voiceCount.get(channelId, Date.now() - PRESENCE_FRESH_MS, peerId).n >= limit) return 'full';
+        q.voiceUpsert.run(peerId, connectionId, instanceId, channelId, userId, Date.now());
+        return 'ok';
+      });
+    },
+    /** Tira a aba da chamada, se ela ainda pertence a esta conexão. Devolve o canal, ou null. */
+    async voiceLeave(peerId, connectionId) {
+      const row = q.voiceChannel.get(peerId, connectionId);
+      if (!row) return null;
+      q.voiceDelete.run(peerId, connectionId);
+      return row.channelId;
+    },
+    async voiceUpdate(peerId, connectionId, { muted, camera, screen }) {
+      const row = q.voiceChannel.get(peerId, connectionId);
+      if (!row) return null;
+      q.voiceUpdate.run(muted ? 1 : 0, camera, screen, peerId, connectionId);
+      return row.channelId;
+    },
+    async voiceParticipants(channelId) {
+      return q.voiceInChannel.all(channelId, Date.now() - PRESENCE_FRESH_MS).map(toVoiceState);
+    },
+    /** As duas abas estão na mesma chamada? (Só assim uma pode mandar sinal à outra.) */
+    async voicePeersTogether(peerA, peerB) {
+      const row = q.voicePair.get(peerA, peerB, Date.now() - PRESENCE_FRESH_MS);
+      return row.peers === 2 && row.channels === 1;
+    },
+    /** Sinal de vida das chamadas desta instância; devolve os canais de onde saiu gente que sumiu. */
+    async voiceTouch(instanceId) {
+      q.voiceTouch.run(Date.now(), instanceId);
+      const cutoff = Date.now() - PRESENCE_FRESH_MS;
+      const stale = q.voiceStale.all(cutoff).map((row) => row.channelId);
+      if (stale.length > 0) q.voiceSweep.run(cutoff);
+      return stale;
+    },
+    async voiceClear(instanceId) {
+      const channels = q.voiceOfInstance.all(instanceId).map((row) => row.channelId);
+      q.voiceClear.run(instanceId);
+      return channels;
+    },
+    /** Quem está em chamada nos canais que a pessoa enxerga: [{ channelId, peerId, userId, ... }]. */
+    async listVoiceStatesForUser(userId) {
+      return q.voiceForUser.all(userId, Date.now() - PRESENCE_FRESH_MS).map((row) => ({ channelId: row.channelId, ...toVoiceState(row) }));
     },
   };
 }

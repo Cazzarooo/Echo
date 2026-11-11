@@ -7,6 +7,7 @@ import { promptCreateSpace, promptJoinSpace } from './dialogs.js';
 import { createMembers } from './members.js';
 import { createSidebar } from './sidebar.js';
 import { createTimeline } from './timeline.js';
+import { createVoiceStage } from './voice-stage.js';
 
 const MEMBERS_KEY = 'echo:membros';
 const TYPING_SIGNAL_MS = 3000;
@@ -38,6 +39,7 @@ export function renderShell(root, { sendToGateway, onLogout }) {
 
   const sidebar = createSidebar({ onNavigate: () => setNavOpen(false), onLogout });
   const members = createMembers();
+  const stage = createVoiceStage();
   const timeline = createTimeline({
     onNearTop: () => {
       if (state.activeChannelId !== null) loadOlder(state.activeChannelId).catch(report);
@@ -86,7 +88,7 @@ export function renderShell(root, { sendToGateway, onLogout }) {
       h('button', { class: 'button button--quiet', type: 'button', onclick: promptJoinSpace }, 'Entrar com convite'),
     ),
   );
-  const main = h('main', { class: 'main' }, head, banner, timeline.element, jump, typing, composer.element, welcome);
+  const main = h('main', { class: 'main' }, head, banner, timeline.element, jump, typing, composer.element, stage.element, welcome);
   const scrim = h('button', { class: 'scrim', type: 'button', 'aria-label': 'Fechar rodas e canais', onclick: () => setNavOpen(false) });
   const shell = h('div', { class: 'shell' }, sidebar.element, main, members.element, scrim);
 
@@ -118,7 +120,7 @@ export function renderShell(root, { sendToGateway, onLogout }) {
 
   /** Só conta como lido se a pessoa está de fato olhando o fim da conversa. */
   function readIfWatching() {
-    if (state.activeChannelId !== null && document.hasFocus() && timeline.isAtBottom()) markRead(state.activeChannelId);
+    if (activeChannel()?.kind === 'text' && document.hasFocus() && timeline.isAtBottom()) markRead(state.activeChannelId);
   }
 
   function showTyping() {
@@ -133,14 +135,18 @@ export function renderShell(root, { sendToGateway, onLogout }) {
     const channel = activeChannel();
     const hasChannel = channel !== null;
 
+    // Canal de voz mostra o palco da chamada (voice-stage.js) no lugar da conversa escrita.
+    const isText = hasChannel && channel.kind !== 'voice';
     title.textContent = hasChannel ? channel.name : '';
     title.hidden = !hasChannel;
+    title.classList.toggle('main__channel--voice', hasChannel && !isText);
     spaceName.textContent = space ? space.name : '';
-    for (const part of [timeline.element, typing, composer.element, membersButton]) part.hidden = !hasChannel;
+    for (const part of [timeline.element, typing, composer.element]) part.hidden = !isText;
+    membersButton.hidden = !hasChannel;
     welcome.hidden = hasChannel;
     layoutMembers();
 
-    if (!hasChannel) {
+    if (!isText) {
       shownChannelId = null;
       jump.hidden = true;
       return;
@@ -225,6 +231,7 @@ export function renderShell(root, { sendToGateway, onLogout }) {
       unsubscribe();
       clearTimeout(bannerTimer);
       sidebar.destroy();
+      stage.destroy();
       members.destroy();
       window.removeEventListener('focus', readIfWatching);
     },

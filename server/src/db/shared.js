@@ -5,6 +5,17 @@ export const PRESENCE_FRESH_MS = 75_000;
 /** Depois disto, registros de presença de instâncias que sumiram são apagados. */
 export const PRESENCE_STALE_MS = 10 * 60_000;
 
+/** Uma pessoa numa chamada, como a interface recebe. */
+export function toVoiceState(row) {
+  return {
+    peerId: row.peerId,
+    userId: row.userId,
+    muted: row.muted === true || row.muted === 1,
+    camera: row.camera ?? null,
+    screen: row.screen ?? null,
+  };
+}
+
 export function toMessage(row) {
   return {
     id: row.id,

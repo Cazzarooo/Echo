@@ -1,6 +1,8 @@
 import { isDesktop } from '../desktop.js';
 import { avatar, h, icon } from '../dom.js';
 import { activeSpace, isUnread, selectChannel, selectSpace, spaceHasUnread, state, subscribe } from '../state.js';
+import { subscribeVoice, voice } from '../voice.js';
+import { createVoiceBar } from './voice-stage.js';
 import { openDesktopSettingsDialog, openInviteDialog, promptCreateChannel, promptCreateSpace, promptJoinSpace } from './dialogs.js';
 
 /** Barra lateral: troca de roda, canais da roda atual e o cartão de quem está logado. */
@@ -8,7 +10,13 @@ export function createSidebar({ onNavigate, onLogout }) {
   const switcher = h('div', { class: 'space-switch' });
   const channels = h('nav', { class: 'channels', 'aria-label': 'Canais' });
   const foot = h('div', { class: 'sidebar__foot' });
-  const element = h('aside', { class: 'sidebar' }, switcher, channels, foot);
+  const voiceBar = createVoiceBar({
+    onOpen(channelId) {
+      selectChannel(channelId);
+      onNavigate();
+    },
+  });
+  const element = h('aside', { class: 'sidebar' }, switcher, channels, voiceBar.element, foot);
   let menuOpen = false;
 
   function closeMenu() {
@@ -96,29 +104,34 @@ export function createSidebar({ onNavigate, onLogout }) {
       return;
     }
 
-    channels.replaceChildren(
+    const isOwner = space.ownerId === state.user.id;
+    const sectionHead = (label, kind, addLabel) =>
       h(
         'div',
         { class: 'section-head' },
-        h('span', {}, 'Canais'),
-        space.ownerId === state.user.id &&
+        h('span', {}, label),
+        isOwner &&
           h(
             'button',
             {
               class: 'icon-button',
               type: 'button',
-              title: 'Abrir um canal',
-              'aria-label': 'Abrir um canal',
-              'data-key': 'novo-canal',
-              onclick: () => promptCreateChannel(space),
+              title: addLabel,
+              'aria-label': addLabel,
+              'data-key': `novo-${kind}`,
+              onclick: () => promptCreateChannel(space, kind),
             },
             icon('plus', 16),
           ),
-      ),
+      );
+    const voiceChannels = space.channels.filter((channel) => channel.kind === 'voice');
+
+    channels.replaceChildren(
+      sectionHead('Canais', 'text', 'Abrir um canal'),
       h(
         'ul',
         {},
-        space.channels.map((channel) => {
+        space.channels.filter((channel) => channel.kind !== 'voice').map((channel) => {
           const active = channel.id === state.activeChannelId;
           const unread = isUnread(channel);
           return h(
@@ -140,6 +153,54 @@ export function createSidebar({ onNavigate, onLogout }) {
               h('span', { class: 'channel__name' }, channel.name),
               unread && h('span', { class: 'unread-dot', role: 'img', 'aria-label': 'mensagens novas' }),
             ),
+          );
+        }),
+      ),
+      // A seção de voz aparece se há canais de voz, ou para quem pode criá-los.
+      (voiceChannels.length > 0 || isOwner) && sectionHead('Voz', 'voice', 'Abrir um canal de voz'),
+      h(
+        'ul',
+        {},
+        voiceChannels.map((channel) => {
+          const active = channel.id === state.activeChannelId;
+          const inCall = voice.status !== 'idle' && voice.channelId === channel.id;
+          return h(
+            'li',
+            {},
+            h(
+              'button',
+              {
+                class: ['channel', active && 'is-active', inCall && 'is-in-call'].filter(Boolean).join(' '),
+                type: 'button',
+                'aria-current': active ? 'page' : null,
+                'data-key': `canal-${channel.id}`,
+                onclick: () => {
+                  selectChannel(channel.id);
+                  onNavigate();
+                },
+              },
+              icon('speaker', 16),
+              h('span', { class: 'channel__name' }, channel.name),
+            ),
+            (channel.voice ?? []).length > 0 &&
+              h(
+                'ul',
+                { class: 'callers' },
+                channel.voice.map((participant) => {
+                  const person = space.members.find((member) => member.id === participant.userId);
+                  return (
+                    person &&
+                    h(
+                      'li',
+                      { class: 'caller' },
+                      avatar(person, true),
+                      h('span', { class: 'caller__name' }, person.displayName),
+                      participant.muted && icon('micOff', 14),
+                      participant.screen && icon('screen', 14),
+                    )
+                  );
+                }),
+              ),
           );
         }),
       ),
@@ -210,8 +271,11 @@ export function createSidebar({ onNavigate, onLogout }) {
     } else if (topic === 'unread') {
       renderSwitcher();
       renderChannels();
+    } else if (topic === 'voice' || topic === 'members') {
+      renderChannels();
     }
   });
+  const unsubscribeVoice = subscribeVoice(renderChannels);
 
   renderSwitcher();
   renderChannels();
@@ -221,6 +285,8 @@ export function createSidebar({ onNavigate, onLogout }) {
     element,
     destroy() {
       unsubscribe();
+      unsubscribeVoice();
+      voiceBar.destroy();
       document.removeEventListener('pointerdown', onPointerDown);
       document.removeEventListener('keydown', onKeyDown);
     },

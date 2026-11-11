@@ -57,6 +57,12 @@ export function parseChannelName(value) {
   return name;
 }
 
+export function parseChannelKind(value) {
+  if (value === undefined || value === null) return 'text';
+  if (value !== 'text' && value !== 'voice') throw invalid('kind', 'Tipo de canal desconhecido.');
+  return value;
+}
+
 export const MESSAGE_MAX_LENGTH = 4000;
 
 export function parseMessageContent(value) {

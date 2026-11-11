@@ -43,7 +43,7 @@ export const api = {
 
   createSpace: (name) => request('POST', '/api/spaces', { name }),
   joinSpace: (code) => request('POST', '/api/spaces/join', { code }),
-  createChannel: (spaceId, name) => request('POST', `/api/spaces/${spaceId}/channels`, { name }),
+  createChannel: (spaceId, name, kind) => request('POST', `/api/spaces/${spaceId}/channels`, { name, kind }),
 
   listMessages: (channelId, { before } = {}) =>
     request('GET', `/api/channels/${channelId}/messages${before ? `?before=${before}` : ''}`),
