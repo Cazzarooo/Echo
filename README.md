@@ -49,7 +49,7 @@ Para gente em computadores diferentes conversar, todos precisam falar com o mesm
 
 ### Vercel
 
-O repositório já vem pronto para a Vercel (`vercel.json` e `api/server.mjs`):
+A Vercel roda o `Dockerfile` da raiz como contêiner (ela escolhe esse modo sozinha ao importar o projeto):
 
 1. Na Vercel, importe o repositório como projeto.
 2. Em **Storage**, adicione um banco **Postgres** (por exemplo o Neon, no Marketplace) e conecte-o ao projeto. Isso define `DATABASE_URL` sozinho.
@@ -59,9 +59,9 @@ Na Vercel não há disco permanente e podem existir várias instâncias do servi
 
 ### Servidor próprio ou contêiner
 
-O `Dockerfile` na raiz monta o servidor (API, gateway e a interface web) com o banco SQLite em arquivo:
+O mesmo `Dockerfile` serve em qualquer hospedagem de contêiner. Sem Postgres configurado, o banco é um arquivo SQLite:
 
-- Ele escuta na porta `8080` e guarda o banco em `/data`. **Monte um volume persistente em `/data`**, senão as contas e as conversas somem a cada reinício.
+- Ele escuta na porta `80` (ou na que vier em `PORT`) e guarda o banco em `/data`. **Monte um volume persistente em `/data`**, senão as contas e as conversas somem a cada reinício.
 - A hospedagem precisa aceitar WebSocket e entregar HTTPS na frente do contêiner.
 - Com o servidor no ar, qualquer pessoa usa o Echo pelo navegador, em `https://<seu-endereço>/app`, sem instalar nada. O aplicativo desktop aponta para o mesmo endereço em "Usar outro servidor".
 

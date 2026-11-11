@@ -1,10 +1,26 @@
+import http from 'node:http';
 import { createApp } from './app.js';
 import { loadConfig } from './config.js';
 
 const config = loadConfig();
-const app = await createApp(config);
 
+/** Hospedado sem banco: em vez de perder dados em silêncio, explica o que falta. */
+function createSetupNotice() {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('O Echo ainda não tem banco de dados. No painel da Vercel, adicione um Postgres ao projeto (aba Storage), conecte-o e publique de novo (Redeploy).');
+  });
+  return {
+    listen: () => new Promise((resolve, reject) => server.once('error', reject).listen(config.port, config.host, () => resolve(server.address()))),
+    close: () => new Promise((resolve) => server.close(() => resolve())),
+  };
+}
+
+let app;
 try {
+  const missingDatabase = config.requirePostgres && !config.postgres;
+  if (missingDatabase) console.error('[echo] nenhum Postgres configurado (DATABASE_URL); servindo só o aviso de configuração.');
+  app = missingDatabase ? createSetupNotice() : await createApp(config);
   const { port } = await app.listen();
   const shownHost = config.host === '0.0.0.0' || config.host === '::' ? 'localhost' : config.host;
   console.log(`[echo] servidor no ar: http://${shownHost}:${port}/app`);
