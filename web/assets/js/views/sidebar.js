@@ -3,7 +3,7 @@ import { avatar, h, icon } from '../dom.js';
 import { activeSpace, isUnread, selectChannel, selectSpace, spaceHasUnread, state, subscribe } from '../state.js';
 import { subscribeVoice, voice } from '../voice.js';
 import { createVoiceBar } from './voice-stage.js';
-import { openDesktopSettingsDialog, openInviteDialog, promptCreateChannel, promptCreateSpace, promptJoinSpace } from './dialogs.js';
+import { openChannelDialog, openDesktopSettingsDialog, openInviteDialog, promptCreateChannel, promptCreateSpace, promptJoinSpace } from './dialogs.js';
 
 /** Barra lateral: troca de roda, canais da roda atual e o cartão de quem está logado. */
 export function createSidebar({ onNavigate, onLogout }) {
@@ -125,6 +125,21 @@ export function createSidebar({ onNavigate, onLogout }) {
           ),
       );
     const voiceChannels = space.channels.filter((channel) => channel.kind === 'voice');
+    // O lápis de editar (renomear ou excluir) aparece ao passar o mouse, só para quem criou a roda.
+    const editButton = (channel) =>
+      isOwner &&
+      h(
+        'button',
+        {
+          class: 'icon-button channel-edit',
+          type: 'button',
+          title: 'Editar canal',
+          'aria-label': `Editar o canal ${channel.name}`,
+          'data-key': `editar-${channel.id}`,
+          onclick: () => openChannelDialog(space, channel),
+        },
+        icon('pencil', 14),
+      );
 
     channels.replaceChildren(
       sectionHead('Canais', 'text', 'Abrir um canal'),
@@ -136,7 +151,7 @@ export function createSidebar({ onNavigate, onLogout }) {
           const unread = isUnread(channel);
           return h(
             'li',
-            {},
+            { class: 'channel-item' },
             h(
               'button',
               {
@@ -153,6 +168,7 @@ export function createSidebar({ onNavigate, onLogout }) {
               h('span', { class: 'channel__name' }, channel.name),
               unread && h('span', { class: 'unread-dot', role: 'img', 'aria-label': 'mensagens novas' }),
             ),
+            editButton(channel),
           );
         }),
       ),
@@ -166,7 +182,7 @@ export function createSidebar({ onNavigate, onLogout }) {
           const inCall = voice.status !== 'idle' && voice.channelId === channel.id;
           return h(
             'li',
-            {},
+            { class: 'channel-item' },
             h(
               'button',
               {
@@ -182,6 +198,7 @@ export function createSidebar({ onNavigate, onLogout }) {
               icon('speaker', 16),
               h('span', { class: 'channel__name' }, channel.name),
             ),
+            editButton(channel),
             (channel.voice ?? []).length > 0 &&
               h(
                 'ul',
@@ -192,7 +209,7 @@ export function createSidebar({ onNavigate, onLogout }) {
                     person &&
                     h(
                       'li',
-                      { class: 'caller' },
+                      { class: voice.speaking.has(participant.peerId) ? 'caller is-speaking' : 'caller' },
                       avatar(person, true),
                       h('span', { class: 'caller__name' }, person.displayName),
                       participant.muted && icon('micOff', 14),

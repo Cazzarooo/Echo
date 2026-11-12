@@ -93,6 +93,8 @@ export function createRouter() {
   return {
     get: (pattern, handler) => add('GET', pattern, handler),
     post: (pattern, handler) => add('POST', pattern, handler),
+    patch: (pattern, handler) => add('PATCH', pattern, handler),
+    delete: (pattern, handler) => add('DELETE', pattern, handler),
     match,
   };
 }

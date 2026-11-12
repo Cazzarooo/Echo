@@ -1,4 +1,5 @@
-import { createChannel, createSpace, joinSpace } from '../actions.js';
+import { createChannel, createSpace, deleteChannel, joinSpace, renameChannel } from '../actions.js';
+import { canChooseSpeaker, chooseDevice, listDevices, voice } from '../voice.js';
 import { desktop } from '../desktop.js';
 import { h, icon, toast } from '../dom.js';
 
@@ -171,6 +172,114 @@ export async function openDesktopSettingsDialog() {
         toggle('openAtLogin', 'Abrir junto com o computador', 'Inicia o Echo quando você entra na sua conta do sistema.'),
       ),
       h('p', { class: 'field__hint' }, `Echo para desktop, versão ${info.version}.`),
+      h('div', { class: 'dialog__actions' }, h('button', { class: 'button', type: 'button', onclick: () => dialog.close() }, 'Pronto')),
+    ),
+  );
+}
+
+/** Editar um canal (de texto ou de voz): trocar o nome ou excluir. Só aparece para quem criou a roda. */
+export function openChannelDialog(space, channel) {
+  const isVoice = channel.kind === 'voice';
+  const error = h('p', { class: 'form-error', role: 'alert', hidden: true });
+  const input = h('input', { class: 'input', required: true, autocomplete: 'off', maxLength: 32, value: channel.name });
+  const save = h('button', { class: 'button', type: 'submit' }, 'Salvar');
+  let confirming = false;
+
+  const fail = (failure) => {
+    error.textContent = failure.message;
+    error.hidden = false;
+  };
+
+  // Excluir pede um segundo clique: apaga também as mensagens, e não tem volta.
+  const remove = h(
+    'button',
+    {
+      class: 'button button--danger',
+      type: 'button',
+      onclick: async () => {
+        if (!confirming) {
+          confirming = true;
+          remove.replaceChildren(icon('trash', 16), 'Clique de novo para excluir');
+          return;
+        }
+        remove.disabled = true;
+        try {
+          await deleteChannel(channel.id);
+          dialog.close();
+        } catch (failure) {
+          fail(failure);
+          remove.disabled = false;
+        }
+      },
+    },
+    icon('trash', 16),
+    'Excluir canal',
+  );
+
+  const form = h(
+    'form',
+    {
+      class: 'dialog__body',
+      onsubmit: async (event) => {
+        event.preventDefault();
+        error.hidden = true;
+        save.disabled = true;
+        try {
+          await renameChannel(channel.id, input.value);
+          dialog.close();
+        } catch (failure) {
+          fail(failure);
+          input.focus();
+        } finally {
+          save.disabled = false;
+        }
+      },
+    },
+    h('h2', { class: 'dialog__title' }, isVoice ? 'Editar canal de voz' : 'Editar canal'),
+    h('label', { class: 'field' }, h('span', { class: 'field__label' }, 'Nome do canal'), input, h('span', { class: 'field__hint' }, 'Espaços viram hífen e tudo fica em minúsculas.')),
+    error,
+    h('div', { class: 'dialog__actions' }, h('button', { class: 'button button--quiet', type: 'button', onclick: () => dialog.close() }, 'Cancelar'), save),
+    h(
+      'div',
+      { class: 'danger-zone' },
+      h('p', { class: 'field__hint' }, isVoice ? 'Excluir encerra a chamada que estiver acontecendo neste canal.' : 'Excluir apaga também todas as mensagens deste canal. Não dá para desfazer.'),
+      remove,
+    ),
+  );
+  const dialog = mountDialog(form);
+  input.focus();
+  input.select();
+}
+
+/** Escolha de microfone, saída de áudio e câmera. Vale na hora, inclusive no meio de uma chamada. */
+export async function openVoiceSettingsDialog() {
+  const devices = await listDevices().catch(() => ({ microphone: [], speaker: [], camera: [] }));
+
+  function chooser(kind, label) {
+    const options = devices[kind];
+    const select = h(
+      'select',
+      { class: 'input', onchange: () => chooseDevice(kind, select.value) },
+      h('option', { value: '' }, 'Padrão do sistema'),
+      options.map((device) => h('option', { value: device.id }, device.label)),
+    );
+    // Um dispositivo guardado que não está mais ligado volta a aparecer como "padrão".
+    select.value = options.some((device) => device.id === voice.devices[kind]) ? voice.devices[kind] : '';
+    return h('label', { class: 'field' }, h('span', { class: 'field__label' }, label), select);
+  }
+
+  const named = [...devices.microphone, ...devices.speaker, ...devices.camera].some((device) => !device.label.startsWith('Dispositivo '));
+  const dialog = mountDialog(
+    h(
+      'div',
+      { class: 'dialog__body' },
+      h('h2', { class: 'dialog__title' }, 'Áudio e vídeo'),
+      !named && h('p', { class: 'dialog__text' }, 'Os nomes dos aparelhos só aparecem depois que você entra numa chamada e permite o microfone neste site.'),
+      chooser('microphone', 'Microfone (entrada)'),
+      canChooseSpeaker
+        ? chooser('speaker', 'Fone ou caixa de som (saída)')
+        : h('p', { class: 'field__hint' }, 'Este navegador não deixa escolher a saída de áudio por site; troque a saída nas configurações de som do sistema.'),
+      chooser('camera', 'Câmera'),
       h('div', { class: 'dialog__actions' }, h('button', { class: 'button', type: 'button', onclick: () => dialog.close() }, 'Pronto')),
     ),
   );

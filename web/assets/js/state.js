@@ -164,6 +164,32 @@ export function addChannel(channel) {
   emit('spaces');
 }
 
+export function renameChannel({ id, name }) {
+  const channel = findChannel(id)?.channel;
+  if (!channel || channel.name === name) return;
+  channel.name = name;
+  emit('spaces');
+}
+
+/** Tira um canal excluído; se era o que estava aberto, passa para outro da mesma roda. */
+export function removeChannel(channelId) {
+  const found = findChannel(channelId);
+  if (!found) return;
+  found.space.channels = found.space.channels.filter((channel) => channel.id !== channelId);
+  state.history.delete(channelId);
+  state.typing.delete(channelId);
+  if (state.activeChannelId === channelId) {
+    state.activeChannelId = pickChannel(found.space, null)?.id ?? null;
+    rememberSelection();
+    emit('spaces');
+    emit('active');
+    emit('members');
+  } else {
+    emit('spaces');
+  }
+  emit('unread');
+}
+
 /** Troca o histórico do canal pela página mais recente vinda do servidor. */
 export function setLatest(channelId, messages, hasMore) {
   const history = historyOf(channelId);
@@ -258,6 +284,12 @@ export function applyEvent(event) {
       break;
     case 'read_state':
       setRead(event.channelId, event.lastReadId);
+      break;
+    case 'channel_update':
+      renameChannel(event.channel);
+      break;
+    case 'channel_delete':
+      removeChannel(event.channelId);
       break;
     case 'voice_state': {
       // Quem está na chamada de um canal de voz (a lista inteira, a cada mudança).

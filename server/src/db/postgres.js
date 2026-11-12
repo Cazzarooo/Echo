@@ -230,6 +230,15 @@ export async function openPostgresDatabase(driver) {
       return { id, spaceId, name, kind, lastMessageId: null, lastReadId: 0 };
     },
     findChannel: (id) => one('SELECT id, space_id AS "spaceId", name, kind FROM channels WHERE id = $1', [id]),
+    async renameChannel(id, name) {
+      await all('UPDATE channels SET name = $1 WHERE id = $2', [name, id]);
+    },
+    /** Apaga o canal e, com ele, as mensagens, os estados de leitura e a chamada em andamento. */
+    async deleteChannel(id) {
+      await all('DELETE FROM channels WHERE id = $1', [id]);
+    },
+    countTextChannels: async (spaceId) =>
+      (await one("SELECT COUNT(*)::integer AS n FROM channels WHERE space_id = $1 AND kind = 'text'", [spaceId])).n,
     listChannelsForUser: (userId) =>
       all(
         `SELECT ${CHANNEL_STATE_COLUMNS}

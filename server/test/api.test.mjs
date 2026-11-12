@@ -485,3 +485,49 @@ test('canal de voz: entrar, ver quem está, combinar a conexão e sair', async (
 
   await Promise.all([anaGw.close(), betoAgain.close(), carlaGw.close(), doraGw.close()]);
 });
+
+test('renomear e excluir canais: só quem criou a roda, e sempre sobra um canal de texto', async () => {
+  const ana = await signUp('ana');
+  const beto = await signUp('beto');
+  const space = await createSpace(ana);
+  await join(beto, space);
+  const general = space.channels[0];
+  const call = async (person, method, pathname, body) => {
+    const response = await fetch(base + pathname, {
+      method,
+      headers: { Cookie: person.client.cookie, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const text = await response.text();
+    return { status: response.status, body: text ? JSON.parse(text) : null };
+  };
+  const betoGw = openGateway(beto.client);
+  await betoGw.opened;
+
+  const extra = (await ana.client.post(`/api/spaces/${space.id}/channels`, { name: 'avisos' })).body.channel;
+  const voice = (await ana.client.post(`/api/spaces/${space.id}/channels`, { name: 'sala', kind: 'voice' })).body.channel;
+  await ana.client.post(`/api/channels/${extra.id}/messages`, { content: 'vai sumir junto com o canal' });
+
+  assert.equal((await call(beto, 'PATCH', `/api/channels/${extra.id}`, { name: 'meu' })).status, 403);
+  assert.equal((await call(beto, 'DELETE', `/api/channels/${extra.id}`)).status, 403);
+
+  const renamed = await call(ana, 'PATCH', `/api/channels/${extra.id}`, { name: 'Recados da Semana' });
+  assert.equal(renamed.status, 200);
+  assert.deepEqual(renamed.body.channel, { id: extra.id, spaceId: space.id, name: 'recados-da-semana', kind: 'text' });
+  assert.deepEqual((await betoGw.next((event) => event.type === 'channel_update')).channel, renamed.body.channel);
+  assert.equal((await call(ana, 'PATCH', `/api/channels/${extra.id}`, { name: 'geral' })).status, 409);
+  assert.equal((await call(ana, 'PATCH', `/api/channels/${voice.id}`, { name: 'Sala de Jogos' })).body.channel.name, 'sala-de-jogos');
+
+  assert.equal((await call(ana, 'DELETE', `/api/channels/${extra.id}`)).status, 204);
+  assert.deepEqual(await betoGw.next((event) => event.type === 'channel_delete'), { type: 'channel_delete', channelId: extra.id, spaceId: space.id });
+  assert.equal((await ana.client.get(`/api/channels/${extra.id}/messages`)).status, 404);
+  assert.equal((await call(ana, 'DELETE', `/api/channels/${voice.id}`)).status, 204);
+
+  const last = await call(ana, 'DELETE', `/api/channels/${general.id}`);
+  assert.equal(last.status, 409);
+  assert.equal(last.body.error.code, 'last_channel');
+  const boot = await ana.client.get('/api/bootstrap');
+  assert.deepEqual(boot.body.spaces[0].channels.map((channel) => channel.name), ['geral']);
+
+  await betoGw.close();
+});

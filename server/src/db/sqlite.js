@@ -168,6 +168,9 @@ export function openSqliteDatabase(file) {
 
     insertChannel: db.prepare('INSERT INTO channels (space_id, name, kind, created_at) VALUES (?, ?, ?, ?)'),
     channelById: db.prepare('SELECT id, space_id AS spaceId, name, kind FROM channels WHERE id = ?'),
+    renameChannel: db.prepare('UPDATE channels SET name = ? WHERE id = ?'),
+    deleteChannel: db.prepare('DELETE FROM channels WHERE id = ?'),
+    textChannelCount: db.prepare("SELECT COUNT(*) AS n FROM channels WHERE space_id = ? AND kind = 'text'"),
     channelsForUser: db.prepare(`
       SELECT ${CHANNEL_STATE_COLUMNS}
       FROM channels c
@@ -332,6 +335,16 @@ export function openSqliteDatabase(file) {
     },
     async findChannel(id) {
       return q.channelById.get(id);
+    },
+    async renameChannel(id, name) {
+      q.renameChannel.run(name, id);
+    },
+    /** Apaga o canal e, com ele, as mensagens, os estados de leitura e a chamada em andamento. */
+    async deleteChannel(id) {
+      q.deleteChannel.run(id);
+    },
+    async countTextChannels(spaceId) {
+      return q.textChannelCount.get(spaceId).n;
     },
     async listChannelsForUser(userId) {
       return q.channelsForUser.all(userId);

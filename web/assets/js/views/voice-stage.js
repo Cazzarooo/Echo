@@ -1,5 +1,6 @@
 import { avatar, h, icon } from '../dom.js';
 import { activeChannel, activeSpace, state, subscribe } from '../state.js';
+import { openVoiceSettingsDialog } from './dialogs.js';
 import { joinVoice, leaveVoice, subscribeVoice, toggleCamera, toggleMute, toggleScreen, voice } from '../voice.js';
 
 /**
@@ -33,8 +34,9 @@ export function createVoiceStage() {
     return entry;
   }
 
-  function fill(entry, { person, text, stream, muted, mirrored, wide }) {
+  function fill(entry, { person, text, stream, muted, mirrored, wide, speaking }) {
     entry.tile.classList.toggle('tile--wide', wide);
+    entry.tile.classList.toggle('is-speaking', speaking);
     entry.tile.classList.toggle('has-video', stream !== null);
     entry.video.classList.toggle('is-mirrored', mirrored);
     if (entry.video.srcObject !== stream) entry.video.srcObject = stream;
@@ -50,7 +52,7 @@ export function createVoiceStage() {
         type: 'button',
         title: label,
         'aria-label': label,
-        'aria-pressed': danger ? null : String(active),
+        'aria-pressed': danger || iconName === 'sliders' ? null : String(active),
         onclick: onClick,
       },
       icon(iconName, 20),
@@ -78,9 +80,9 @@ export function createVoiceStage() {
       const mine = participant.peerId === voice.peerId;
       const name = mine ? `${person.displayName} (você)` : person.displayName;
       const camera = here ? streamOf(participant, participant.camera) : null;
-      wanted.push([`${participant.peerId}:pessoa`, { person, text: name, stream: camera, muted: participant.muted, mirrored: mine, wide: false }]);
+      wanted.push([`${participant.peerId}:pessoa`, { person, text: name, stream: camera, muted: participant.muted, mirrored: mine, wide: false, speaking: voice.speaking.has(participant.peerId) }]);
       const screen = here ? streamOf(participant, participant.screen) : null;
-      if (screen) wanted.push([`${participant.peerId}:tela`, { person, text: `Tela de ${person.displayName}`, stream: screen, muted: false, mirrored: false, wide: true }]);
+      if (screen) wanted.push([`${participant.peerId}:tela`, { person, text: `Tela de ${person.displayName}`, stream: screen, muted: false, mirrored: false, wide: true, speaking: false }]);
     }
 
     const keep = new Set(wanted.map(([key]) => key));
@@ -105,6 +107,7 @@ export function createVoiceStage() {
         controlButton(voice.muted ? 'micOff' : 'mic', voice.muted ? 'Ligar o microfone' : 'Desligar o microfone', !voice.muted, toggleMute),
         controlButton(voice.camera ? 'camera' : 'cameraOff', voice.camera ? 'Desligar a câmera' : 'Ligar a câmera', voice.camera !== null, toggleCamera),
         controlButton('screen', voice.screen ? 'Parar de compartilhar a tela' : 'Compartilhar a tela', voice.screen !== null, toggleScreen),
+        controlButton('sliders', 'Microfone, saída de áudio e câmera', false, openVoiceSettingsDialog),
         controlButton('hangup', 'Sair da chamada', false, leaveVoice, true),
       );
     } else {
@@ -116,6 +119,7 @@ export function createVoiceStage() {
           icon('speaker', 18),
           joining ? 'Entrando…' : 'Entrar na chamada',
         ),
+        h('button', { class: 'button button--quiet', type: 'button', onclick: openVoiceSettingsDialog }, icon('sliders', 18), 'Áudio e vídeo'),
       );
     }
   }

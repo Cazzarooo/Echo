@@ -9,6 +9,8 @@ import {
   historyOf,
   isUnread,
   prependOlder,
+  removeChannel,
+  renameChannel as renameChannelInState,
   selectChannel,
   selectSpace,
   setLatest,
@@ -69,6 +71,16 @@ export async function joinSpace(code) {
   const { space } = await api.joinSpace(code);
   addSpace(space);
   selectSpace(space.id);
+}
+
+export async function renameChannel(channelId, name) {
+  const { channel } = await api.renameChannel(channelId, name);
+  renameChannelInState(channel);
+}
+
+export async function deleteChannel(channelId) {
+  await api.deleteChannel(channelId);
+  removeChannel(channelId);
 }
 
 export async function createChannel(spaceId, name, kind = 'text') {

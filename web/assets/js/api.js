@@ -45,6 +45,9 @@ export const api = {
   joinSpace: (code) => request('POST', '/api/spaces/join', { code }),
   createChannel: (spaceId, name, kind) => request('POST', `/api/spaces/${spaceId}/channels`, { name, kind }),
 
+  renameChannel: (channelId, name) => request('PATCH', `/api/channels/${channelId}`, { name }),
+  deleteChannel: (channelId) => request('DELETE', `/api/channels/${channelId}`),
+
   listMessages: (channelId, { before } = {}) =>
     request('GET', `/api/channels/${channelId}/messages${before ? `?before=${before}` : ''}`),
   sendMessage: (channelId, content) => request('POST', `/api/channels/${channelId}/messages`, { content }),

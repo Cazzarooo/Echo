@@ -1384,3 +1384,83 @@ ul {
   border-color: var(--danger);
   color: #fff;
 }
+
+/* --- editar canal, opções de áudio e quem está falando ------------------------- */
+
+.channel-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.channel-item .channel {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+
+.channel-item .callers {
+  flex-basis: 100%;
+}
+
+.channel-edit {
+  width: 26px;
+  height: 26px;
+  margin-left: 2px;
+  opacity: 0;
+}
+
+.channel-item:hover .channel-edit,
+.channel-edit:focus-visible {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .channel-edit {
+    opacity: 0.7;
+  }
+}
+
+.button--danger {
+  background: transparent;
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.button--danger:hover {
+  background: var(--danger-soft);
+}
+
+.danger-zone {
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+select.input {
+  appearance: auto;
+}
+
+.stage__controls {
+  flex-wrap: wrap;
+}
+
+/* Anel verde em quem está falando. */
+.tile.is-speaking {
+  border-color: var(--leaf);
+  box-shadow: 0 0 0 3px var(--leaf);
+}
+
+.tile.is-speaking .tile__face .avatar {
+  box-shadow: 0 0 0 3px var(--surface), 0 0 0 6px var(--leaf);
+}
+
+.caller.is-speaking .avatar {
+  box-shadow: 0 0 0 2px var(--sidebar), 0 0 0 4px var(--leaf);
+}
+
+.caller.is-speaking .caller__name {
+  color: var(--ink);
+}

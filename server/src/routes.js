@@ -241,6 +241,48 @@ export function buildApi({ db, hub, config }) {
     return { status: 201, body: { channel } };
   });
 
+  // Renomear e excluir canal: só quem criou a roda.
+  async function requireOwnedChannel(channelId, user) {
+    const channel = await db.findChannel(channelId);
+    if (!channel || !(await db.isMember(channel.spaceId, user.id))) {
+      throw new HttpError(404, 'channel_not_found', 'Canal não encontrado.');
+    }
+    const space = await db.findSpace(channel.spaceId);
+    if (space.ownerId !== user.id) throw new HttpError(403, 'forbidden', 'Só quem criou a roda pode mudar os canais.');
+    return channel;
+  }
+
+  router.patch('/api/channels/:id', async ({ req, params, body }) => {
+    const user = await requireUser(req);
+    const channel = await requireOwnedChannel(params.id, user);
+    throttle(writeLimiter, user.id);
+    const name = parseChannelName((await body()).name);
+    try {
+      await db.renameChannel(channel.id, name);
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        throw new HttpError(409, 'channel_exists', 'Já existe um canal com esse nome nesta roda.', { field: 'name' });
+      }
+      throw error;
+    }
+    const renamed = { id: channel.id, spaceId: channel.spaceId, name, kind: channel.kind };
+    await hub.toSpace(channel.spaceId, { type: 'channel_update', channel: renamed });
+    return { status: 200, body: { channel: renamed } };
+  });
+
+  router.delete('/api/channels/:id', async ({ req, params }) => {
+    const user = await requireUser(req);
+    const channel = await requireOwnedChannel(params.id, user);
+    throttle(writeLimiter, user.id);
+    // Toda roda mantém ao menos um canal de texto, senão não sobra onde conversar.
+    if (channel.kind === 'text' && (await db.countTextChannels(channel.spaceId)) <= 1) {
+      throw new HttpError(409, 'last_channel', 'Esse é o único canal de texto da roda; crie outro antes de excluir este.');
+    }
+    await db.deleteChannel(channel.id);
+    await hub.toSpace(channel.spaceId, { type: 'channel_delete', channelId: channel.id, spaceId: channel.spaceId });
+    return { status: 204 };
+  });
+
   // --- mensagens -------------------------------------------------------------
 
   router.get('/api/channels/:id/messages', async ({ req, params, url }) => {

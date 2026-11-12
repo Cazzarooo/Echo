@@ -112,7 +112,7 @@ Cada roda pode ter canais de voz. Quem entra fala com os outros, pode ligar a c�
 ## O que ainda não tem
 
 - Editar e apagar mensagens, mensagens diretas, anexos e busca.
-- Nas chamadas: indicador de quem está falando, escolha de microfone/câmera e, no aplicativo desktop, escolha de qual janela compartilhar (hoje vai a tela inteira).
+- No aplicativo desktop, escolher qual janela compartilhar numa chamada (hoje vai a tela inteira; no navegador a escolha já existe).
 - Papéis e moderação: hoje só quem criou a roda abre canais, e não dá para sair de uma roda nem trocar o convite.
 - Avisos do sistema no navegador (existem só no aplicativo desktop).
 - Atualização automática e assinatura digital do aplicativo.
